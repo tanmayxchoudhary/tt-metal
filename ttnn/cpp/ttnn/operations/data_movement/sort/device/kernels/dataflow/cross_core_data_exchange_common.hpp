@@ -5,6 +5,10 @@
 #pragma once
 
 #include "api/dataflow/dataflow_api.h"
+#include "api/tensor/noc_traits.h"
+#include "api/dataflow/circular_buffer.h"
+#include "api/dataflow/endpoints.h"
+#include "api/dataflow/noc.h"
 
 #include <cstdint>
 
@@ -52,6 +56,10 @@ void sort_noc_exchange_Wt_tiles(
     uint32_t other_core_x,
     uint32_t other_core_y,
     sem_ptr_t sem_self_ptr) {
+    Noc noc;
+    UnicastEndpoint remote_endpoint;
+    CircularBuffer value_tensor_this_cb(value_tensor_this_cb_index);
+    CircularBuffer index_tensor_this_cb(index_tensor_this_cb_index);
     constexpr uint32_t ONE_TILE = 1;
 
     const uint64_t sem_noc_addr = get_noc_addr(other_core_x, other_core_y, reinterpret_cast<uint32_t>(sem_self_ptr));
@@ -61,13 +69,8 @@ void sort_noc_exchange_Wt_tiles(
         cb_reserve_back(cb_value_peer_index, ONE_TILE);
         cb_reserve_back(cb_index_peer_index, ONE_TILE);
 
-        uint32_t cb_value_peer_local_write_addr = get_write_ptr(cb_value_peer_index);
-        uint32_t cb_index_peer_local_write_addr = get_write_ptr(cb_index_peer_index);
-
-        uint64_t cb_value_peer_noc_write_addr =
-            get_noc_addr(other_core_x, other_core_y, cb_value_peer_local_write_addr);
-        uint64_t cb_index_peer_noc_write_addr =
-            get_noc_addr(other_core_x, other_core_y, cb_index_peer_local_write_addr);
+        const uint32_t cb_value_peer_local_write_addr = get_write_ptr(cb_value_peer_index);
+        const uint32_t cb_index_peer_local_write_addr = get_write_ptr(cb_index_peer_index);
 
         // Handshake for tile exchange
         noc_semaphore_inc(sem_noc_addr, 1);
@@ -77,14 +80,22 @@ void sort_noc_exchange_Wt_tiles(
         // Send local indices and values to peer
         cb_wait_front(value_tensor_this_cb_index, ONE_TILE);
         cb_wait_front(index_tensor_this_cb_index, ONE_TILE);
-        uint32_t value_cb_self_read_addr = get_read_ptr(value_tensor_this_cb_index);
-        uint32_t index_cb_self_read_addr = get_read_ptr(index_tensor_this_cb_index);
 
         // Write tiles to peer core
-        noc_async_write(value_cb_self_read_addr, cb_value_peer_noc_write_addr, value_cb_tile_size);
-        noc_async_write(index_cb_self_read_addr, cb_index_peer_noc_write_addr, index_cb_tile_size);
+        noc.async_write(
+            value_tensor_this_cb,
+            remote_endpoint,
+            value_cb_tile_size,
+            {},
+            {.noc_x = other_core_x, .noc_y = other_core_y, .addr = cb_value_peer_local_write_addr});
+        noc.async_write(
+            index_tensor_this_cb,
+            remote_endpoint,
+            index_cb_tile_size,
+            {},
+            {.noc_x = other_core_x, .noc_y = other_core_y, .addr = cb_index_peer_local_write_addr});
 
-        noc_async_write_barrier();
+        noc.async_write_barrier();
 
         cb_pop_front(value_tensor_this_cb_index, ONE_TILE);
         cb_pop_front(index_tensor_this_cb_index, ONE_TILE);
