@@ -304,6 +304,10 @@ void kernel_main() {
             // into TILE_H RM rows for the writer/reader to drain.
             constexpr uint32_t TILE_H = 32;
             constexpr uint32_t MAX_DEST_TILES = DST_ACCUM_MODE ? 4 : 8;
+            // number_of_tiles_per_core is a power-of-two: get_number_of_tiles_per_core()
+            // returns Wt / num_cores, and Wt is always a power-of-two (padded by
+            // pre_sort_transform_tensor).  MAX_DEST_TILES is also a power-of-two (4 or 8),
+            // so number_of_tiles_per_core % SUB_BLOCK_DIM == 0 is always satisfied.
             constexpr uint32_t SUB_BLOCK_DIM =
                 (number_of_tiles_per_core < MAX_DEST_TILES) ? number_of_tiles_per_core : MAX_DEST_TILES;
             constexpr uint32_t NUM_SUB_BLOCKS = number_of_tiles_per_core / SUB_BLOCK_DIM;
