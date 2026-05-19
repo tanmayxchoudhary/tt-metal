@@ -4,6 +4,7 @@
 
 #include "paged_fused_update_cache_device_operation.hpp"
 #include "paged_fused_update_cache_device_operation_types.hpp"
+#include "ttnn/device_operation.hpp"
 #include "ttnn/operations/core/compute_kernel/compute_kernel_config.hpp"
 
 using namespace tt::tt_metal;

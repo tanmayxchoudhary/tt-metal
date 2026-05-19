@@ -5,59 +5,30 @@
 #pragma once
 
 #include "paged_fused_update_cache_device_operation_types.hpp"
-#include "ttnn/device_operation.hpp"
-#include <vector>
-#include <tt-metalium/host_api.hpp>
+
+#include <tt-metalium/program_descriptors.hpp>
+
+#include <optional>
 
 namespace ttnn::experimental::prim {
 
-struct PagedTiledFusedUpdateCacheSharedVariables {
-    tt::tt_metal::KernelHandle unary_reader_kernel_id = 0;
-    tt::tt_metal::KernelHandle unary_writer_kernel_id = 0;
-    std::vector<tt::tt_metal::CoreCoord> cores1;
-    std::vector<tt::tt_metal::CoreCoord> cores2;
-    uint32_t Wbytes = 0;
-    uint32_t Wt = 0;
-    tt::tt_metal::CBHandle cb_src1 = 0;
-    tt::tt_metal::CBHandle cb_src3 = 0;
-    tt::tt_metal::CBHandle cb_cur_pos_id = 0;
-    tt::tt_metal::CBHandle cb_page_table_id = 0;
-    uint32_t cache_batch_num_tiles = 0;
-    bool use_index_tensor = false;
-    bool is_paged_cache = false;
-};
-
 struct PagedTiledFusedUpdateCacheProgramFactory {
-    using shared_variables_t = PagedTiledFusedUpdateCacheSharedVariables;
-    using cached_program_t = ttnn::device_operation::CachedProgram<shared_variables_t>;
-
-    static cached_program_t create(
-        const PagedFusedUpdateCacheParams& operation_attributes,
-        const PagedFusedUpdateCacheInputs& tensor_args,
-        PagedFusedUpdateCacheResult& tensor_return_value);
-
-    static void override_runtime_arguments(
-        cached_program_t& cached_program,
+    static tt::tt_metal::ProgramDescriptor create_descriptor(
         const PagedFusedUpdateCacheParams& operation_attributes,
         const PagedFusedUpdateCacheInputs& tensor_args,
         PagedFusedUpdateCacheResult& tensor_return_value);
 };
 
 struct PagedTiledFusedUpdateCacheMeshWorkloadFactory {
-    using shared_variables_t = PagedTiledFusedUpdateCacheSharedVariables;
-    using cached_mesh_workload_t = ttnn::device_operation::AdaptedCachedMeshWorkload<shared_variables_t>;
-
-    static cached_mesh_workload_t create_mesh_workload(
-        const PagedFusedUpdateCacheParams& operation_attributes,
-        const ttnn::MeshCoordinateRangeSet& tensor_coords,
-        const PagedFusedUpdateCacheInputs& tensor_args,
-        PagedFusedUpdateCacheResult& tensor_return_value);
-
-    static void override_runtime_arguments(
-        cached_mesh_workload_t& cached_workload,
+    // Per-coord program build.  Coordinates outside operation_attributes.mesh_coords
+    // (when provided) get an empty program — the legacy mesh path skipped them
+    // entirely; with the descriptor framework we still must hand back a descriptor
+    // for every dispatched coord, so we return an empty one for excluded coords.
+    static tt::tt_metal::ProgramDescriptor create_descriptor(
         const PagedFusedUpdateCacheParams& operation_attributes,
         const PagedFusedUpdateCacheInputs& tensor_args,
-        PagedFusedUpdateCacheResult& tensor_return_value);
+        PagedFusedUpdateCacheResult& tensor_return_value,
+        const std::optional<ttnn::MeshCoordinate>& mesh_dispatch_coordinate);
 };
 
 }  // namespace ttnn::experimental::prim
