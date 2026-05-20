@@ -54,27 +54,26 @@ void recip_tile_first_column(uint32_t idst) {
 // compared to exp_tile<false, true>(idx, VectorMode::RC).
 template <uint16_t scale_bf16>
 void calculate_exponential_first_column() {
-    constexpr int ITERATIONS_HALF_FACE = 8;
-    //
-    // #ifdef ARCH_BLACKHOLE
-    //    // If on Blackhole: Overwrite INCRW
-    //    addr_mod_t {
-    //	.srca = {.incr = 0},
-    //	.srcb = {.incr = 0},
-    //	.dest = {.incr = 4}, // sfpi::dst_reg += 2
-    //    }
-    //	.set(ADDR_MOD_6);
-    // #endif // ARCH_BLACKHOLE
-    //
-    // ckernel::sfpu::_sfpu_exp_21f_bf16_tti_</*SCALE_EN*/ true, DST_ACCUM_MODE, /*CLAMP_NEGATIVE*/true,
-    //					 ITERATIONS_HALF_FACE>(scale_bf16);
+    constexpr int ITERATIONS_HALF_FACE = 4;
 
-    for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
-        sfpi::vFloat val = sfpi::dst_reg[0];
-        sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, DST_ACCUM_MODE>(val, scale_bf16);
-        sfpi::dst_reg[0] = result;
-        sfpi::dst_reg += 2;
+#ifdef ARCH_BLACKHOLE
+    // If on Blackhole: Overwrite INCRW
+    addr_mod_t{
+        .srca = {.incr = 0}, .srcb = {.incr = 0}, .dest = {.incr = 4},  // sfpi::dst_reg += 2
     }
+        .set(ADDR_MOD_6);
+#endif  // ARCH_BLACKHOLE
+
+    ckernel::sfpu::
+        _sfpu_exp_21f_bf16_tti_</*SCALE_EN*/ true, DST_ACCUM_MODE, /*CLAMP_NEGATIVE*/ false, ITERATIONS_HALF_FACE>(
+            scale_bf16);
+
+    // for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+    //     sfpi::vFloat val = sfpi::dst_reg[0];
+    //     sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, DST_ACCUM_MODE>(val, scale_bf16);
+    //     sfpi::dst_reg[0] = result;
+    //     sfpi::dst_reg += 2;
+    // }
 }
 
 template <uint16_t scale_bf16>
@@ -192,6 +191,8 @@ inline void calculate_exponential_full_face_init() {
     TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_UPPER, 0x27ac);
     TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_LOWER, 0xa418);
     TTI_SFPCONFIG(0, p_sfpu::LREG13, 0);
+
+    // ckernel::sfpu::_init_sfpu_reciprocal_<false>();
 }
 
 #endif  // TRISC_MATH
@@ -204,14 +205,27 @@ void exp_full_tile(uint32_t idst) {
         calculate_exponential_full_face<
             /*SCALE_EN*/ true,
             /*ITERATIONS*/ 8,
-            /*CLAMP_NEGATIVE*/ true,
+            /*CLAMP_NEGATIVE*/ false,
             DST_ACCUM_MODE>,
         idst,
-        scale_bf16,
-        (int)VectorMode::RC);
+        (int)VectorMode::RC,
+        scale_bf16);
+
+    //_llk_math_eltwise_unary_sfpu_params_(
+    //    calculate_exp_legacy<
+    //        /*APPROXIMATION_MODE*/ false,
+    //        /*SCALE_EN*/ true,
+    //        /*ITERATIONS*/ 8,
+    //        /*CLAMP_NEGATIVE*/ true,
+    //        DST_ACCUM_MODE>,
+    //    idst,
+    //    (int)VectorMode::RC,
+    //    scale_bf16);
+
 #endif  // TRISC_MATH
 }
 
+template <bool approx, uint32_t scale>
 inline void exp_full_tile_init() {
 // #define SFPU_TEMPLATE_INIT_KERNEL(OP, INIT_CB, APPROX, SCALE, CLAMP_NEGATIVE, DST_ACCUM_MODE)
 // MATH(SFPU_TEMPLATE_INIT_KERNEL(exponential, sfpu::exp_init, /*APPROX*/false, scale_fp32, /*CLAMP_NEGATIVE*/true,
@@ -238,8 +252,9 @@ void apply_exp_inplace_and_find_exp_sum(uint32_t cb_attention_weights, uint32_t 
 
     // Fused scale+exp: compute exp(scale * (score - max)) in a single SFPU pass.
     constexpr uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_fp32 >> 16);
-    exp_tile_init</* approx */ false, scaler_fp32>();
-    exp_tile</* approx */ false, /* scale_en */ true>(exp_dst_idx, VectorMode::RC, scaler_bf16);
+    exp_full_tile_init</*approx*/ false, scaler_fp32>();
+    exp_full_tile<scaler_bf16>(exp_dst_idx);
+
     tile_regs_commit();
 
     tile_regs_wait();
@@ -316,7 +331,7 @@ void update_exp_max_diff(uint32_t cb_prev_max_value, uint32_t cb_cur_max_value, 
     // only column 0 has data. Process 4× fewer SFPU iterations than full-tile exp.
     constexpr uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_fp32 >> 16);
 
-    exp_full_tile_init();
+    exp_full_tile_init</*approx*/ false, scaler_fp32>();
     MATH((exp_tile_first_column<scaler_bf16>(exp_max_diff_dst_idx)));
     tile_regs_commit();
 
