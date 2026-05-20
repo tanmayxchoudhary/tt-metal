@@ -54,7 +54,21 @@ void recip_tile_first_column(uint32_t idst) {
 // compared to exp_tile<false, true>(idx, VectorMode::RC).
 template <uint16_t scale_bf16>
 void calculate_exponential_first_column() {
-    constexpr int ITERATIONS_HALF_FACE = 4;
+    constexpr int ITERATIONS_HALF_FACE = 8;
+    //
+    // #ifdef ARCH_BLACKHOLE
+    //    // If on Blackhole: Overwrite INCRW
+    //    addr_mod_t {
+    //	.srca = {.incr = 0},
+    //	.srcb = {.incr = 0},
+    //	.dest = {.incr = 4}, // sfpi::dst_reg += 2
+    //    }
+    //	.set(ADDR_MOD_6);
+    // #endif // ARCH_BLACKHOLE
+    //
+    // ckernel::sfpu::_sfpu_exp_21f_bf16_tti_</*SCALE_EN*/ true, DST_ACCUM_MODE, /*CLAMP_NEGATIVE*/true,
+    //					 ITERATIONS_HALF_FACE>(scale_bf16);
+
     for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
         sfpi::vFloat val = sfpi::dst_reg[0];
         sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, DST_ACCUM_MODE>(val, scale_bf16);
@@ -147,6 +161,65 @@ void update_cur_row_max_value(
     pack_tile(reduce_dst_idx, cb_cur_max);
     tile_regs_release();
     cb_push_back(cb_cur_max, onetile);
+}
+
+#ifdef TRISC_MATH
+
+template <bool SCALE_EN, int ITERATIONS, bool CLAMP_NEGATIVE, bool is_fp32_dest_acc_en>
+void calculate_exponential_full_face(const std::uint16_t exp_base_scale_factor) {
+    ckernel::sfpu::_sfpu_exp_21f_bf16_tti_<SCALE_EN, is_fp32_dest_acc_en, CLAMP_NEGATIVE, ITERATIONS>(
+        exp_base_scale_factor);
+}
+
+inline void calculate_exponential_full_face_init() {
+#ifdef ARCH_BLACKHOLE
+    // _calculate_exponential_tti_bf16_() path:
+    // Auto-increment Dest on ADDR_MOD_6
+    addr_mod_t{
+        .srca = {.incr = 0},
+        .srcb = {.incr = 0},
+        .dest = {.incr = 2},
+    }
+        .set(ADDR_MOD_6);
+#endif  // ARCH_BLACKHOLE
+
+    // LREG12 = 1/ln2
+    TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_UPPER, 0x3fb8);
+    TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_LOWER, 0xaa3b);
+    TTI_SFPCONFIG(0, p_sfpu::LREG12, 0);
+
+    // LREG13 = c2 = 4.791750143340323e-15f (0x27aca418)
+    TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_UPPER, 0x27ac);
+    TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_LOWER, 0xa418);
+    TTI_SFPCONFIG(0, p_sfpu::LREG13, 0);
+}
+
+#endif  // TRISC_MATH
+
+template <uint16_t scale_bf16>
+void exp_full_tile(uint32_t idst) {
+    constexpr auto input_clamping = InputClamping::ClampToNegative;
+#ifdef TRISC_MATH
+    _llk_math_eltwise_unary_sfpu_params_(
+        calculate_exponential_full_face<
+            /*SCALE_EN*/ true,
+            /*ITERATIONS*/ 8,
+            /*CLAMP_NEGATIVE*/ true,
+            DST_ACCUM_MODE>,
+        idst,
+        scale_bf16,
+        (int)VectorMode::RC);
+#endif  // TRISC_MATH
+}
+
+inline void exp_full_tile_init() {
+// #define SFPU_TEMPLATE_INIT_KERNEL(OP, INIT_CB, APPROX, SCALE, CLAMP_NEGATIVE, DST_ACCUM_MODE)
+// MATH(SFPU_TEMPLATE_INIT_KERNEL(exponential, sfpu::exp_init, /*APPROX*/false, scale_fp32, /*CLAMP_NEGATIVE*/true,
+// DST_ACCUM_MODE)); SFPU_INIT_CB(OP, INIT_CB, (APPROX, SCALE, CLAMP_NEGATIVE, DST_ACCUM_MODE))
+#ifdef TRISC_MATH
+
+    ::ckernel::llk_math_eltwise_unary_sfpu_init<::SfpuType::exponential>(calculate_exponential_full_face_init);
+#endif
 }
 
 /* We process data by one tile, because we read only one row of K
@@ -242,6 +315,8 @@ void update_exp_max_diff(uint32_t cb_prev_max_value, uint32_t cb_cur_max_value, 
     // Both max values are column vectors, so the result is a column vector —
     // only column 0 has data. Process 4× fewer SFPU iterations than full-tile exp.
     constexpr uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_fp32 >> 16);
+
+    exp_full_tile_init();
     MATH((exp_tile_first_column<scaler_bf16>(exp_max_diff_dst_idx)));
     tile_regs_commit();
 
