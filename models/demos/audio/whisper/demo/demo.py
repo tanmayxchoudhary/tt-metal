@@ -879,23 +879,19 @@ def test_demo_for_conditional_generation(
     )
 
     if should_check_perf:
-        metrics_dictionary = {
-            2: {"prefill_time_to_token": 0.13, "decode_t/s/u": 124.0},
-            8: {"prefill_time_to_token": 0.14, "decode_t/s/u": 105.0},
-            32: {"prefill_time_to_token": 0.22, "decode_t/s/u": 77.5},
-        }
-        expected_perf_metrics = None
+        sku = None
         if is_blackhole():
-            if mesh_device.dram_grid_size().x == 7:  # P100 DRAM grid is 7x1
-                expected_perf_metrics = {"prefill_time_to_token": 0.06, "decode_t/s/u": 310.0}
-            else:
-                expected_perf_metrics = {"prefill_time_to_token": 0.05, "decode_t/s/u": 530.0}
-        elif mesh_device.get_num_devices() in metrics_dictionary:  # wormhole_b0
-            expected_perf_metrics = metrics_dictionary[mesh_device.get_num_devices()]
+            # P100 DRAM grid is 7x1.
+            sku = "bh_p100" if mesh_device.dram_grid_size().x == 7 else "bh_p150"
+        else:
+            sku = {
+                2: "wh_n300",
+                8: "wh_llmbox_perf",
+                32: "wh_galaxy_perf",
+            }.get(mesh_device.get_num_devices())
 
-        if expected_perf_metrics is not None:
+        if sku is not None:
             total_batch = mesh_device.get_num_devices() * batch_size_per_device
-            expected_perf_metrics["decode_t/s"] = expected_perf_metrics["decode_t/s/u"] * total_batch
             measurements = {
                 "prefill_time_to_token": ttft,
                 "decode_t/s": decode_throughput * total_batch,
@@ -908,13 +904,14 @@ def test_demo_for_conditional_generation(
             }
             verify_perf(
                 measurements,
-                expected_perf_metrics,
-                high_tol_percentage=1.20,
                 expected_measurements=expected_measurements,
+                model_name=model_repo,
+                sku=sku,
+                batch_size=total_batch,
             )
         else:
             logger.warning(
-                f"Skipping perf check: no expected perf target for {mesh_device.get_num_devices()}-device wormhole_b0 mesh"
+                f"Skipping perf check: unsupported device topology for model={model_repo} with {mesh_device.get_num_devices()} devices"
             )
 
 
