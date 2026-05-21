@@ -530,35 +530,31 @@ def comp_pcc(golden, calculated, pcc=0.99):
         golden = golden.type(torch.float32)
         calculated = calculated.type(torch.float32)
 
-    # Single element case
-    if golden.numel() == 1:
-        return torch.equal(golden, calculated), float(torch.equal(golden, calculated))
-
-    # If both tensors are constant
-    if torch.max(golden) == torch.min(golden) and torch.max(calculated) == torch.min(calculated):
-        result = torch.isclose(torch.max(golden), torch.max(calculated)).item()
-        return result, 1.0 if result else 0.0
-
-    # If only one tensor is constant, PCC is mathematically undefined (zero std dev).
-    # Fall back to allclose rather than returning a misleading 1.0.
+    # If either tensor is constant, PCC is mathematically undefined (zero std dev).
+    # Fall back to allclose rather than returning a misleading 1.0. Also covers single-element
+    # tensors, where max == min trivially.
     if torch.max(golden) == torch.min(golden) or torch.max(calculated) == torch.min(calculated):
         logger.warning(
-            "One tensor is constant (zero standard deviation). " "PCC is undefined. Falling back to allclose check."
+            "One or both tensors are constant (zero standard deviation). "
+            "PCC is undefined. Falling back to allclose check."
         )
         result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
-        return result, 1.0 if result else 0.0
+        return result, float(result)
 
     cal_pcc = np.ma.corrcoef(
         np.ma.masked_invalid(torch.squeeze(golden).detach().numpy()).flatten(),
         np.ma.masked_invalid(torch.squeeze(calculated).detach().numpy()).flatten(),
     )
-    # Read off-diagonal directly instead of np.min to avoid diagonal contamination
+    # Read off-diagonal directly instead of np.min to avoid diagonal contamination.
     cal_pcc = cal_pcc[0, 1]
 
+    # Defensive: corrcoef can still return MaskedConstant or NaN if the masked arrays
+    # collapse to identical values after invalid-element removal (e.g. mixed NaN/inf inputs
+    # not fully filtered above). Fall back to allclose rather than crashing or returning 1.0.
     if isinstance(cal_pcc, np.ma.core.MaskedConstant) or np.isnan(float(cal_pcc)):
         logger.warning("PCC returned NaN/masked. Falling back to allclose check.")
         result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
-        return result, 1.0 if result else 0.0
+        return result, float(result)
 
     return cal_pcc >= pcc, float(cal_pcc)
 
