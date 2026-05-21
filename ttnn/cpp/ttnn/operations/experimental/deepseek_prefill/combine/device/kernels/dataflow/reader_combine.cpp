@@ -10,7 +10,7 @@
 #include "ttnn/operations/ccl/common/kernels/moe_utils.hpp"
 #include "ttnn/operations/experimental/deepseek_prefill/combine/device/kernels/dataflow/zero_init_common.hpp"
 
-#define ENABLE_COMBINE_DEBUG 0
+#define ENABLE_COMBINE_DEBUG 1
 #if ENABLE_COMBINE_DEBUG
 #define DPRINT_COMBINE DPRINT
 #else
@@ -305,15 +305,25 @@ void kernel_main() {
         // Clamp to the dispatch buffer capacity to mirror reader_dispatch's overflow guard:
         // dispatch silently drops tokens beyond max_dispatch_buffer_token_size, so reading
         // past it would pull stale/zero-init data and risk out-of-bounds DRAM access.
+
+        DPRINT_COMBINE << "Expert=" << local_expert << " start_page=" << start_page << " tokens=" << expert_tokens
+                       << ENDL();
+
         if (start_page >= max_dispatch_buffer_token_size) {
+            DPRINT_COMBINE << "OVERFLOW" << ENDL();
             expert_tokens = 0;
         } else if (start_page + expert_tokens > max_dispatch_buffer_token_size) {
+            DPRINT_COMBINE << "OVERFLOW SA EXPERT_TOKENS" << ENDL();
             expert_tokens = max_dispatch_buffer_token_size - start_page;
+        }
+        if (expert_tokens == 0) {
+            continue;
         }
         uint32_t end_page = start_page + expert_tokens;
         uint32_t num_batches = (expert_tokens + read_batch_size - 1) / read_batch_size;
 
-        DPRINT_COMBINE << "Expert=" << local_expert << " tokens=" << expert_tokens << ENDL();
+        // DPRINT_COMBINE << "Expert=" << local_expert << " start_page=" << start_page
+        //                << " tokens=" << expert_tokens << ENDL();
 
 #if IS_TILE_LAYOUT
 #else

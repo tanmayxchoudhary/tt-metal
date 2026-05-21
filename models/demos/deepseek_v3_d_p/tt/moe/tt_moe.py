@@ -555,6 +555,138 @@ class TtMoe(LightweightModule):
         # ========================================
         # Combine expects TILE_LAYOUT input
         logger.debug(f"[TtMoe.forward] expert_outputs shape: {expert_outputs.shape} {expert_outputs.dtype=}")
+        ttnn.synchronize_device(self.mesh_device)
+
+        # --- Pre-combine diagnostic: Python mirror of reader_combine.cpp's expert loop ---
+        # Reproduces what kernels/dataflow/reader_combine.cpp does per (chip, local_expert):
+        #   1. start_page   = expert_region_offsets[chip, local_expert]
+        #   2. expert_tokens = expert_token_counts[chip, local_expert]
+        #   3. Clamp against the per-chip dispatch-buffer capacity (same overflow guard as
+        #      reader_combine lines 312-318) and flag the OVERFLOW / OVERFLOW SA EXPERT_TOKENS
+        #      cases the kernel logs via DPRINT_COMBINE.
+        #   4. Walk metadata[chip, start_page : end_page] (each row = (dst_chip, dst_token_idx,
+        #      dst_topk_indice, ...)) and compute the per-token output_page_idx the kernel uses
+        #      (= dst_token_idx * num_experts_per_tok + dst_topk_indice) plus whether each
+        #      token routes locally (dst_chip == this_chip) or via fabric.
+        # Output dumped to ${TT_METAL_HOME}/generated/combine_precombine_dump.log.
+        #
+        # SOURCE OF TRUTH for the clamp: we use the host metadata tensor's row-count per chip
+        # (dim 1 after composing), not self.dispatch_module.max_dispatch_buffer_token_size —
+        # any disagreement between them is itself a bug signal, so we log a "[LAYOUT WARNING]"
+        # header line when they differ.
+        _dbg_reported_max_cap = self.dispatch_module.max_dispatch_buffer_token_size
+        # num_chips is determined by the mesh, not derived from tensor sizes. Each chip's
+        # per-device counts/offsets tensor stores the FULL global-expert table (size
+        # num_routed_experts), not just that chip's experts_per_chip slice — slicing it
+        # by experts_per_chip would mis-count the chip dim.
+        _dbg_num_chips_total = self.mesh_device.get_num_devices()
+        _dbg_num_routed_experts = self.experts_per_chip * _dbg_num_chips_total  # 256 for 2x4
+        _dbg_ep_composer = ttnn.create_mesh_composer(self.mesh_device, ttnn.MeshComposerConfig(dims=[1, 0]))
+        _dbg_counts_host = (
+            ttnn.to_torch(ttnn.unsqueeze_to_4D(tt_expert_token_counts), mesh_composer=_dbg_ep_composer)
+            .squeeze(2)
+            .to(torch.int64)
+            .reshape(_dbg_num_chips_total, _dbg_num_routed_experts)
+        )  # shape: (num_chips, num_routed_experts) — row c is chip c's full expert table
+        _dbg_offsets_host = (
+            ttnn.to_torch(ttnn.unsqueeze_to_4D(tt_expert_region_offsets), mesh_composer=_dbg_ep_composer)
+            .squeeze(2)
+            .to(torch.int64)
+            .reshape(_dbg_num_chips_total, _dbg_num_routed_experts)
+        )  # shape: (num_chips, num_routed_experts)
+        _dbg_metadata_host = (
+            ttnn.to_torch(ttnn.unsqueeze_to_4D(metadata), mesh_composer=_dbg_ep_composer)
+            .to(torch.int64)
+            .reshape(_dbg_num_chips_total, _dbg_reported_max_cap, ttnn.unsqueeze_to_4D(metadata).shape[-1])
+        )  # shape: (num_chips, max_dispatch_buffer_token_size, metadata_len)
+        _dbg_num_chips, _dbg_max_tokens, _dbg_meta_len = _dbg_metadata_host.shape
+        _dbg_max_cap = _dbg_max_tokens
+        _dbg_log_dir = os.path.join(os.environ.get("TT_METAL_HOME", "."), "generated")
+        os.makedirs(_dbg_log_dir, exist_ok=True)
+        _dbg_log_path = os.path.join(_dbg_log_dir, "combine_precombine_dump_TRACY.log")
+        logger.info(f"[TtMoe.forward] pre-combine dump -> {_dbg_log_path}")
+        with open(_dbg_log_path, "w") as _dbg_f:
+            _dbg_f.write(
+                f"pre-combine dump: num_chips={_dbg_num_chips} "
+                f"experts_per_chip={self.experts_per_chip} max_tokens={_dbg_max_tokens} "
+                f"metadata_len={_dbg_meta_len} effective_max_dispatch_buffer_token_size={_dbg_max_cap} "
+                f"num_experts_per_tok={self.num_experts_per_tok}\n"
+            )
+            _dbg_f.write(
+                f"device-side shapes: tt_expert_token_counts={tuple(tt_expert_token_counts.shape)} "
+                f"tt_expert_region_offsets={tuple(tt_expert_region_offsets.shape)} "
+                f"metadata={tuple(metadata.shape)} metadata.dtype={metadata.dtype}\n"
+            )
+            if _dbg_reported_max_cap != _dbg_max_cap:
+                _dbg_f.write(
+                    f"[LAYOUT WARNING] self.dispatch_module.max_dispatch_buffer_token_size="
+                    f"{_dbg_reported_max_cap} disagrees with host metadata rows/chip="
+                    f"{_dbg_max_cap}. Loop will use the host value as the authoritative cap; "
+                    f"the kernel uses {_dbg_reported_max_cap} as its compile-time bound.\n"
+                )
+            for _chip_idx in range(_dbg_num_chips):
+                # Each chip c owns the global expert slice [c*experts_per_chip, (c+1)*experts_per_chip).
+                # The kernel reads experts_tok_counter_l1[local_expert] where local_expert iterates
+                # [expert_start_idx, expert_end_idx); on the host that means counts_host[c, global_idx].
+                _expert_base = _chip_idx * self.experts_per_chip
+                for _local_expert in range(self.experts_per_chip):
+                    _global_expert = _expert_base + _local_expert
+                    _start_page = int(_dbg_offsets_host[_chip_idx, _global_expert].item())
+                    _expert_tokens = int(_dbg_counts_host[_chip_idx, _global_expert].item())
+                    _orig_tokens = _expert_tokens
+                    _overflow_flag = ""
+                    # Same clamp/guard as reader_combine.cpp:312-318.
+                    if _start_page >= _dbg_max_cap:
+                        _overflow_flag = "OVERFLOW"
+                        _expert_tokens = 0
+                    elif _start_page + _expert_tokens > _dbg_max_cap:
+                        _overflow_flag = "OVERFLOW SA EXPERT_TOKENS"
+                        _expert_tokens = _dbg_max_cap - _start_page
+                    _end_page = _start_page + _expert_tokens
+                    _dbg_f.write(
+                        f"chip={_chip_idx} local_expert={_local_expert} "
+                        f"global_expert={_global_expert} "
+                        f"start_page={_start_page} tokens={_orig_tokens}"
+                        + (f" -> clamped tokens={_expert_tokens} ({_overflow_flag})\n" if _overflow_flag else "\n")
+                    )
+                    if _expert_tokens == 0:
+                        continue
+                    # Guard against the host metadata tensor being shorter than
+                    # max_dispatch_buffer_token_size — the kernel sees a full
+                    # max_dispatch_buffer_token_size-wide L1 view, but the host-side
+                    # `metadata` tensor returned by dispatch is smaller (per-chip
+                    # = _dbg_max_tokens). When start_page+expert_tokens overruns it,
+                    # we can't decode those slots from the host snapshot.
+                    if _start_page >= _dbg_max_tokens:
+                        _dbg_f.write(
+                            f"  SKIP: start_page={_start_page} >= host metadata rows "
+                            f"({_dbg_max_tokens}); host tensor cannot represent these slots\n"
+                        )
+                        continue
+                    _end_page_safe = min(_start_page + _expert_tokens, _dbg_max_tokens)
+                    if _end_page_safe < _start_page + _expert_tokens:
+                        _dbg_f.write(
+                            f"  TRUNCATED: walking only {_end_page_safe - _start_page} / "
+                            f"{_expert_tokens} tokens (host metadata dim1={_dbg_max_tokens}, "
+                            f"start_page+tokens={_start_page + _expert_tokens})\n"
+                        )
+                    # Per-token metadata interpretation (mirrors reader_combine.cpp:415-422).
+                    for _t in range(_end_page_safe - _start_page):
+                        _row = _dbg_metadata_host[_chip_idx, _start_page + _t].tolist()
+                        _dst_chip = int(_row[0])
+                        _dst_token_idx = int(_row[1]) if _dbg_meta_len > 1 else -1
+                        _dst_topk_indice = int(_row[2]) if _dbg_meta_len > 2 else -1
+                        _output_page_idx = _dst_token_idx * self.num_experts_per_tok + _dst_topk_indice
+                        _routing = "LOCAL" if _dst_chip == _chip_idx else f"REMOTE -> chip {_dst_chip}"
+                        _dbg_f.write(
+                            f"  slot {_start_page + _t}: dst_chip={_dst_chip} "
+                            f"dst_token_idx={_dst_token_idx} dst_topk_indice={_dst_topk_indice} "
+                            f"output_page_idx={_output_page_idx} {_routing} raw={_row}\n"
+                        )
+
+        # Combine now returns (output, metadata, counts, offsets) — the latter three are
+        # pass-throughs so the post-combine diagnostic below can verify they were not
+        # mutated in-place by the kernel.
 
         combined_output = self.combine_module(
             expert_outputs,
