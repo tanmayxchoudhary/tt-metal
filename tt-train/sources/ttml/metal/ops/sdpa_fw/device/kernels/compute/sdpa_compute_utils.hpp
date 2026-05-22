@@ -70,7 +70,7 @@ void calculate_exponential_first_column() {
 
     // for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
     //     sfpi::vFloat val = sfpi::dst_reg[0];
-    //     sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, DST_ACCUM_MODE>(val, scale_bf16);
+    //     sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, false>(val, scale_bf16);
     //     sfpi::dst_reg[0] = result;
     //     sfpi::dst_reg += 2;
     // }
@@ -193,6 +193,19 @@ inline void calculate_exponential_full_face_init() {
     TTI_SFPCONFIG(0, p_sfpu::LREG13, 0);
 
     // ckernel::sfpu::_init_sfpu_reciprocal_<false>();
+}
+
+template <bool APPROXIMATION_MODE, bool SCALE_EN, int ITERATIONS, bool CLAMP_NEGATIVE, bool is_fp32_dest_acc>
+void calculate_exp_legacy(const std::uint16_t exp_base_scale_factor /* 1.0f in BF16 */) {
+    for (int i = 0; i < ITERATIONS; i++) {
+        sfpi::vFloat x = sfpi::dst_reg[0];
+
+        sfpi::vFloat y =
+            ckernel::sfpu::_ckernel_sfpu_exp_accurate_<SCALE_EN, is_fp32_dest_acc>(x, exp_base_scale_factor);
+
+        sfpi::dst_reg[0] = y;
+        sfpi::dst_reg++;
+    }
 }
 
 #endif  // TRISC_MATH
