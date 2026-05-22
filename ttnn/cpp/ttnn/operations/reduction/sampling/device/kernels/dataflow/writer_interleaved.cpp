@@ -120,7 +120,7 @@ void kernel_main() {
     generate_bcast_unary_scalar(cb_id_temp, temp_packed);
     // generate the top-k mask
     constexpr uint32_t one = 1;
-    generate_mask<cb_id_mask, one>(one, ids_per_batch / 32, k - 1);
+    generate_mask<cb_id_mask, one>(noc, one, ids_per_batch / 32, k - 1);
     // get random number
     cb_rand.wait_front(1);
     CoreLocalMem<volatile uint16_t> rand_values(cb_rand.get_read_ptr());
