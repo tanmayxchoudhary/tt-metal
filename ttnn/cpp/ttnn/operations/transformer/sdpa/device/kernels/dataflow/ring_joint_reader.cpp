@@ -4,6 +4,8 @@
 
 #include <stdint.h>
 #include "api/dataflow/dataflow_api.h"
+#include "api/dataflow/noc.h"
+#include "api/dataflow/circular_buffer.h"
 #include "dataflow_common.hpp"
 #include "chain_link.hpp"
 #include "fused_op_receiver.hpp"
@@ -86,21 +88,18 @@ void kernel_main() {
 
     // After fused-op receiver consumed its runtime args, remaining RT args are S&F chain metadata
 
-    // Compile-time semaphore ids and chain flags are appended after all TensorAccessorArgs()
-    // Head chain semaphores (head-level chain, always built)
-    uint32_t head_sender_semaphore_addr =
-        get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset()));
-    uint32_t head_receiver_semaphore_addr =
-        get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 1));
-    uint32_t head_valid_semaphore_addr =
-        get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 2));
+    // Compile-time semaphore ids and chain flags are appended after all TensorAccessorArgs().
+    // ChainLink takes semaphore IDs directly (the new Semaphore<> wrapper resolves them to L1 addrs).
+    uint32_t head_sender_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset());
+    uint32_t head_receiver_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 1);
+    uint32_t head_valid_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 2);
     constexpr bool head_mcast_enabled = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 3) == 1;
 
-    // Batch chain semaphores (only present when k_uses_batch_chain / NHK == 1)
-    // Initialize to 0; will be overwritten if k_uses_batch_chain
-    uint32_t batch_sender_semaphore_addr = 0;
-    uint32_t batch_receiver_semaphore_addr = 0;
-    uint32_t batch_valid_semaphore_addr = 0;
+    // Batch chain semaphores (only present when k_uses_batch_chain / NHK == 1).
+    // Initialize to 0; will be overwritten if k_uses_batch_chain. Non-participants never use them.
+    uint32_t batch_sender_semaphore_id = 0;
+    uint32_t batch_receiver_semaphore_id = 0;
+    uint32_t batch_valid_semaphore_id = 0;
 
     // batch_mcast_enabled: read from compile-time args if present, else false (for template instantiation)
     constexpr bool batch_mcast_enabled = []() {
@@ -111,12 +110,9 @@ void kernel_main() {
     }();
 
     if constexpr (k_uses_batch_chain) {
-        batch_sender_semaphore_addr =
-            get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 4));
-        batch_receiver_semaphore_addr =
-            get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 5));
-        batch_valid_semaphore_addr =
-            get_semaphore(get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 6));
+        batch_sender_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 4);
+        batch_receiver_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 5);
+        batch_valid_semaphore_id = get_compile_time_arg_val(joint_v_args.next_compile_time_args_offset() + 6);
     }
 
     constexpr uint32_t head_chain_arg_count = 4;
@@ -134,14 +130,16 @@ void kernel_main() {
     constexpr uint32_t k_chunk_tiles = Sk_chunk_t * DHt;
     constexpr uint32_t v_chunk_tiles = Sk_chunk_t * vDHt;
 
+    Noc noc;
+
     // Head chain (head-level): matches (batch, head), used by V and optionally K
     ChainLink<head_mcast_enabled, true> head_chain(
         head_cfg.participates,
         head_cfg.is_injector,
         head_cfg.is_sink,
-        head_sender_semaphore_addr,
-        head_receiver_semaphore_addr,
-        head_valid_semaphore_addr,
+        head_sender_semaphore_id,
+        head_receiver_semaphore_id,
+        head_valid_semaphore_id,
         head_cfg.signal_target_x<head_mcast_enabled>(),
         head_cfg.signal_target_y<head_mcast_enabled>(),
         head_cfg.next_physical_x,
@@ -163,9 +161,9 @@ void kernel_main() {
         batch_cfg.participates,
         batch_cfg.is_injector,
         batch_cfg.is_sink,
-        batch_sender_semaphore_addr,
-        batch_receiver_semaphore_addr,
-        batch_valid_semaphore_addr,
+        batch_sender_semaphore_id,
+        batch_receiver_semaphore_id,
+        batch_valid_semaphore_id,
         batch_cfg.signal_target_x<batch_mcast_enabled>(),
         batch_cfg.signal_target_y<batch_mcast_enabled>(),
         batch_cfg.next_physical_x,
@@ -387,17 +385,18 @@ void kernel_main() {
                 }
 
                 // K: either read locally (injector or not participant) or receive from chain
+                CircularBuffer cb_k(cb_k_in);
                 if constexpr (k_uses_batch_chain && batch_mcast_enabled) {
                     // Ensures that compute has completed with the previous K chunk before we overwrite the buffer with
                     // the next K chunk for mcast.
                     const uint32_t reserve_tiles = is_padded_iter ? 2 * k_chunk_tiles : k_chunk_tiles;
-                    cb_reserve_back(cb_k_in, reserve_tiles);
+                    cb_k.reserve_back(reserve_tiles);
                 } else {
-                    cb_reserve_back(cb_k_in, k_chunk_tiles);
+                    cb_k.reserve_back(k_chunk_tiles);
                 }
-                uint32_t cb_k_start_address = get_write_ptr(cb_k_in);
+                uint32_t cb_k_start_address = cb_k.get_write_ptr();
                 if (k_chain.should_receive(nb, nq)) {
-                    k_chain.receive();
+                    k_chain.receive(noc);
                 } else {
                     // Injector or non-participant: read K from DRAM. Pick the generator once
                     // (joint branch elided when has_joint_k is false), then issue one fetch.
@@ -409,24 +408,25 @@ void kernel_main() {
                         }
                         return ring_iter == 0 ? local_k_generator : gathered_k_generator;
                     }();
-                    fetch_block(k_gen, k_slice, end_seq_tile, cb_k_start_address, k_tile_bytes, true /*transpose*/);
+                    fetch_block(
+                        noc, k_gen, k_slice, end_seq_tile, cb_k_start_address, k_tile_bytes, true /*transpose*/);
                 }
 
                 // Forward K chunk via chain (uses K's data size explicitly)
                 if (k_chain.should_forward(nb, nq, q_iter_local)) {
-                    k_chain.forward(cb_k_start_address, k_chunk_tiles, k_tile_bytes);
+                    k_chain.forward(noc, cb_k_start_address, k_chunk_tiles, k_tile_bytes);
                 }
 
                 // Skip Q, V reads and V forward for padded iterations (K mcast sync only).
-                // Note: cb_push_back is intentionally skipped — without it, the write pointer
-                // doesn't advance, so cb_reserve_back returns the same address each iteration.
+                // Note: push_back is intentionally skipped — without it, the write pointer
+                // doesn't advance, so reserve_back returns the same address each iteration.
                 // This lets the buffer act as a reusable staging area for the mcast.
                 if (is_padded_iter) {
                     continue;
                 }
 
                 // Make K available to compute
-                cb_push_back(cb_k_in, k_chunk_tiles);
+                cb_k.push_back(k_chunk_tiles);
                 KV_chunks_processed_in_iter++;
 
                 // Download Q on the first K iteration — after K is downloaded and forwarded.
@@ -448,6 +448,7 @@ void kernel_main() {
                             const uint32_t sb_row_end = sb_row_start + qk_subblock_h;
                             Slice q_sub_slice(q_slice.d0, q_slice.d1, sb_row_start, sb_row_end, 0, DHt);
                             read_block(
+                                noc,
                                 q_gen,
                                 q_sub_slice,
                                 q_end_seq_tile,
@@ -458,6 +459,7 @@ void kernel_main() {
                         }
                     } else {
                         read_block(
+                            noc,
                             q_gen,
                             q_slice,
                             q_end_seq_tile,
@@ -470,10 +472,11 @@ void kernel_main() {
                 }
 
                 // V: either read locally (injector or not participant) or receive from chain
-                cb_reserve_back(cb_v_in, v_chunk_tiles);
-                uint32_t cb_v_start_address = get_write_ptr(cb_v_in);
+                CircularBuffer cb_v(cb_v_in);
+                cb_v.reserve_back(v_chunk_tiles);
+                uint32_t cb_v_start_address = cb_v.get_write_ptr();
                 if (v_chain.should_receive(nb, nq)) {
-                    v_chain.receive();
+                    v_chain.receive(noc);
                 } else {
                     const auto& v_gen = [&]() -> const auto& {
                         if constexpr (has_joint_k) {
@@ -483,24 +486,27 @@ void kernel_main() {
                         }
                         return ring_iter == 0 ? local_v_generator : gathered_v_generator;
                     }();
-                    fetch_block(v_gen, v_slice, end_seq_tile, cb_v_start_address, v_tile_bytes, false /*transpose*/);
+                    fetch_block(
+                        noc, v_gen, v_slice, end_seq_tile, cb_v_start_address, v_tile_bytes, false /*transpose*/);
                 }
 
                 // Forward V to next core(s) before push_back — prevents compute from
                 // popping the buffer while the mcast is still reading from it.
                 if (v_chain.should_forward(nb, nq, q_iter_local)) {
-                    v_chain.forward(cb_v_start_address);
+                    v_chain.forward(noc, cb_v_start_address);
                 }
 
                 // Make V available to compute
-                cb_push_back(cb_v_in, v_chunk_tiles);
+                cb_v.push_back(v_chunk_tiles);
             }
         }
         if (KV_chunks_processed_in_iter % 2 == 0) {
-            cb_reserve_back(cb_k_in, k_chunk_tiles);
-            cb_reserve_back(cb_v_in, v_chunk_tiles);
-            cb_push_back(cb_k_in, k_chunk_tiles);
-            cb_push_back(cb_v_in, v_chunk_tiles);
+            CircularBuffer cb_k_tail(cb_k_in);
+            CircularBuffer cb_v_tail(cb_v_in);
+            cb_k_tail.reserve_back(k_chunk_tiles);
+            cb_v_tail.reserve_back(v_chunk_tiles);
+            cb_k_tail.push_back(k_chunk_tiles);
+            cb_v_tail.push_back(v_chunk_tiles);
         }
     }
 }
