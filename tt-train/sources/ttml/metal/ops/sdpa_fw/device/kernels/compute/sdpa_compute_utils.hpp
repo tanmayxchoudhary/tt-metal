@@ -67,13 +67,6 @@ void calculate_exponential_first_column() {
     ckernel::sfpu::
         _sfpu_exp_21f_bf16_tti_</*SCALE_EN*/ true, DST_ACCUM_MODE, /*CLAMP_NEGATIVE*/ false, ITERATIONS_HALF_FACE>(
             scale_bf16);
-
-    // for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
-    //     sfpi::vFloat val = sfpi::dst_reg[0];
-    //     sfpi::vFloat result = ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true, false>(val, scale_bf16);
-    //     sfpi::dst_reg[0] = result;
-    //     sfpi::dst_reg += 2;
-    // }
 }
 
 template <uint16_t scale_bf16>
@@ -191,21 +184,6 @@ inline void calculate_exponential_full_face_init() {
     TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_UPPER, 0x27ac);
     TTI_SFPLOADI(p_sfpu::LREG0, sfpi::SFPLOADI_MOD0_LOWER, 0xa418);
     TTI_SFPCONFIG(0, p_sfpu::LREG13, 0);
-
-    // ckernel::sfpu::_init_sfpu_reciprocal_<false>();
-}
-
-template <bool APPROXIMATION_MODE, bool SCALE_EN, int ITERATIONS, bool CLAMP_NEGATIVE, bool is_fp32_dest_acc>
-void calculate_exp_legacy(const std::uint16_t exp_base_scale_factor /* 1.0f in BF16 */) {
-    for (int i = 0; i < ITERATIONS; i++) {
-        sfpi::vFloat x = sfpi::dst_reg[0];
-
-        sfpi::vFloat y =
-            ckernel::sfpu::_ckernel_sfpu_exp_accurate_<SCALE_EN, is_fp32_dest_acc>(x, exp_base_scale_factor);
-
-        sfpi::dst_reg[0] = y;
-        sfpi::dst_reg++;
-    }
 }
 
 #endif  // TRISC_MATH
@@ -223,28 +201,12 @@ void exp_full_tile(uint32_t idst) {
         idst,
         (int)VectorMode::RC,
         scale_bf16);
-
-    //_llk_math_eltwise_unary_sfpu_params_(
-    //    calculate_exp_legacy<
-    //        /*APPROXIMATION_MODE*/ false,
-    //        /*SCALE_EN*/ true,
-    //        /*ITERATIONS*/ 8,
-    //        /*CLAMP_NEGATIVE*/ true,
-    //        DST_ACCUM_MODE>,
-    //    idst,
-    //    (int)VectorMode::RC,
-    //    scale_bf16);
-
 #endif  // TRISC_MATH
 }
 
 template <bool approx, uint32_t scale>
 inline void exp_full_tile_init() {
-// #define SFPU_TEMPLATE_INIT_KERNEL(OP, INIT_CB, APPROX, SCALE, CLAMP_NEGATIVE, DST_ACCUM_MODE)
-// MATH(SFPU_TEMPLATE_INIT_KERNEL(exponential, sfpu::exp_init, /*APPROX*/false, scale_fp32, /*CLAMP_NEGATIVE*/true,
-// DST_ACCUM_MODE)); SFPU_INIT_CB(OP, INIT_CB, (APPROX, SCALE, CLAMP_NEGATIVE, DST_ACCUM_MODE))
 #ifdef TRISC_MATH
-
     ::ckernel::llk_math_eltwise_unary_sfpu_init<::SfpuType::exponential>(calculate_exponential_full_face_init);
 #endif
 }
