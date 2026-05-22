@@ -465,16 +465,19 @@ uint32_t write_partial_tiles_to_memory(
             // L1: cb_out tile layout matches tile_index
             uint32_t l1_read_addr_head = l1_base_addr + tile_index * tile_bytes + in_tile_offset;
 
-            // DRAM tile: global index = out_tile_id + tile_index. TensorAccessor's dst_args has no
-            // byte-offset field, so resolve to a raw NOC address and use the legacy raw-addr write.
-            uint64_t out_writer_tile_addr = get_noc_addr(out_tile_id + tile_index, out_writer);
-            uint64_t out_writer_noc_addr_head = out_writer_tile_addr + in_tile_offset;
-
-            noc_async_write(l1_read_addr_head, out_writer_noc_addr_head, FACE_LINE_BYTES);
-            noc_async_write(
-                l1_read_addr_head + FACE_ELEMENT_CNT * ELEMENT_SIZE,
-                out_writer_noc_addr_head + FACE_ELEMENT_CNT * ELEMENT_SIZE,
-                FACE_LINE_BYTES);
+            const uint32_t dram_tile_id = out_tile_id + tile_index;
+            noc.async_write(
+                CoreLocalMem<uint32_t>(l1_read_addr_head),
+                out_writer,
+                FACE_LINE_BYTES,
+                {},
+                {.page_id = dram_tile_id, .offset_bytes = in_tile_offset});
+            noc.async_write(
+                CoreLocalMem<uint32_t>(l1_read_addr_head + FACE_ELEMENT_CNT * ELEMENT_SIZE),
+                out_writer,
+                FACE_LINE_BYTES,
+                {},
+                {.page_id = dram_tile_id, .offset_bytes = in_tile_offset + FACE_ELEMENT_CNT * ELEMENT_SIZE});
 
             if (++barrier_count == barrier_threshold) {
                 noc.async_writes_flushed();

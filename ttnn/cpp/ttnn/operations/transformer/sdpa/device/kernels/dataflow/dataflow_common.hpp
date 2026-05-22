@@ -958,10 +958,10 @@ void generate_noncausal_padded_mask(const Noc& noc, uint32_t Sq_chunk_t, uint32_
     cb.push_back(mask_size_tiles);
 }
 
-// Issue noc_async_read_page for a (num_rows × cols) tile block. tile_id starts at base_tile_id,
+// Issue noc.async_read for a (num_rows x cols) tile block. tile_id starts at base_tile_id,
 // advances by ++ per col and by row_stride per row (i.e., tile_id += row_stride - cols after each
 // inner col loop). dst starts at dst_addr + dst_row_origin * outer_stride, advances by
-// inner_stride per col and outer_stride per row. No barrier — caller must noc_async_read_barrier().
+// inner_stride per col and outer_stride per row. No barrier - caller must noc.async_read_barrier().
 // barrier_threshold > 0 fires a partial barrier every barrier_threshold tiles.
 template <typename ReaderType>
 inline void issue_block_reads(
@@ -1026,8 +1026,8 @@ inline void zero_fill_block(
     }
 }
 
-// Issue noc_async_write_page for a (num_rows × cols) tile block. Same tile_id/src arithmetic
-// as issue_block_reads (with src instead of dst). No barrier — caller must noc_async_write_barrier().
+// Issue noc.async_write for a (num_rows x cols) tile block. Same tile_id/src arithmetic
+// as issue_block_reads (with src instead of dst). No barrier - caller must noc.async_write_barrier().
 template <typename WriterType>
 inline void issue_block_writes(
     const Noc& noc,
@@ -1481,7 +1481,7 @@ void write_block_row_grouped(
                         {.page_id = tile_id});
                     ++tile_id;
                     if (++barrier_count == barrier_threshold) {
-                        noc.async_writes_flushed(default_trid);
+                        noc.async_writes_flushed<Noc::ResponseMode::NON_POSTED, Noc::BarrierMode::TXN_ID>(default_trid);
                         barrier_count = 0;
                     }
                 }
@@ -1489,7 +1489,7 @@ void write_block_row_grouped(
             l1_read_addr += cols * tile_bytes;
         }
         // Flush THIS drain's writes (default trid) before pop so compute can safely reuse the L1 slot.
-        noc.async_writes_flushed(default_trid);
+        noc.async_writes_flushed<Noc::ResponseMode::NON_POSTED, Noc::BarrierMode::TXN_ID>(default_trid);
         cb.pop_front(tiles_this_group);
     }
     noc.async_write_barrier();
@@ -1499,7 +1499,7 @@ void write_block_row_grouped(
 // overlap with compute's next row-group push. Padding past end_seq_tile is silently skipped
 // (out-of-bound rows produce no writes). flush_trid is the TRID the caller stamped writes
 // with via noc_async_write_set_trid (0 = default); per-group flush uses
-// noc_async_write_flushed_with_trid(flush_trid) so it waits exactly for THIS drain's writes
+// noc.async_writes_flushed<TXN_ID>(flush_trid) so it waits exactly for THIS drain's writes
 // to be source-L1-acked. Caller handles any final DRAM-arrival NoC barrier.
 template <bool all_rows_valid = false, typename CatAddrGeneratorType>
 void write_block_row_grouped_trid(
@@ -1537,7 +1537,7 @@ void write_block_row_grouped_trid(
             cat_addr_generator.issue_writes(
                 noc, group_slice, end_seq_tile, cb.get_read_ptr(), outer_stride, tile_bytes);
         }
-        noc.async_writes_flushed(flush_trid);
+        noc.async_writes_flushed<Noc::ResponseMode::NON_POSTED, Noc::BarrierMode::TXN_ID>(flush_trid);
         cb.pop_front(tiles_this_group);
     }
 }
