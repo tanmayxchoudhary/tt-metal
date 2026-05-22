@@ -372,9 +372,9 @@ void fill_neginf_tile(uint32_t cb_id, uint32_t tile_id) {
  * Within each uint32 word: low 16 bits = even column, high 16 bits = odd column.
  */
 template <uint32_t tile_bytes>
-void fill_vertical_tile_bf16(uint32_t cb_id, uint32_t tile_id, uint32_t unpad_col_in_tile) {
+void fill_vertical_tile_bf16(const Noc& noc, uint32_t cb_id, uint32_t tile_id, uint32_t unpad_col_in_tile) {
     // Start with all zeros (valid)
-    fill_tile_zeros<tile_bytes>(cb_id, tile_id);
+    fill_tile_zeros<tile_bytes>(noc, cb_id, tile_id);
 
     constexpr uint32_t NEGINF_PAIR = 0xFF80FF80;
     constexpr uint32_t bf16_per_uint32 = 2;
@@ -439,9 +439,9 @@ void fill_vertical_tile_bf16(uint32_t cb_id, uint32_t tile_id, uint32_t unpad_co
  * Face 3 (rows 16-31, cols 16-31): same diagonal pattern as face 0 (shifted by 16 in both dims)
  */
 template <uint32_t tile_bytes>
-void fill_causal_diagonal_tile_bf16(uint32_t cb_id, uint32_t tile_id) {
+void fill_causal_diagonal_tile_bf16(const Noc& noc, uint32_t cb_id, uint32_t tile_id) {
     // Start with all zeros
-    fill_tile_zeros<tile_bytes>(cb_id, tile_id);
+    fill_tile_zeros<tile_bytes>(noc, cb_id, tile_id);
 
     constexpr uint32_t NEGINF_PAIR = 0xFF80FF80;
     constexpr uint32_t bf16_per_uint32 = 2;
@@ -507,7 +507,7 @@ void fill_causal_diagonal_tile_bf16(uint32_t cb_id, uint32_t tile_id) {
  * @tparam is_causal_lw          Whether to include the causal diagonal tile
  */
 template <uint32_t global_n_partial_col, uint32_t joint_l_partial_col, uint32_t cb_mask_in, bool is_causal_lw = false>
-void generate_lightweight_mask_tiles() {
+void generate_lightweight_mask_tiles(const Noc& noc) {
     constexpr uint32_t partial_mask_tiles = (global_n_partial_col > 0 ? 1 : 0) + (joint_l_partial_col > 0 ? 1 : 0);
     constexpr uint32_t causal_diag_tiles = is_causal_lw ? 1 : 0;
     constexpr uint32_t total_mask_tiles = 1 + causal_diag_tiles + partial_mask_tiles;
@@ -523,16 +523,16 @@ void generate_lightweight_mask_tiles() {
 
     // Tile 1 (if causal): causal diagonal tile
     if constexpr (is_causal_lw) {
-        fill_causal_diagonal_tile_bf16<mask_tile_size_bytes>(cb_mask_in, tile_idx++);
+        fill_causal_diagonal_tile_bf16<mask_tile_size_bytes>(noc, cb_mask_in, tile_idx++);
     }
 
     // Subsequent tiles: partial mask tiles for boundary conditions
     if constexpr (partial_mask_tiles > 0) {
         if constexpr (global_n_partial_col > 0) {
-            fill_vertical_tile_bf16<mask_tile_size_bytes>(cb_mask_in, tile_idx++, global_n_partial_col);
+            fill_vertical_tile_bf16<mask_tile_size_bytes>(noc, cb_mask_in, tile_idx++, global_n_partial_col);
         }
         if constexpr (joint_l_partial_col > 0) {
-            fill_vertical_tile_bf16<mask_tile_size_bytes>(cb_mask_in, tile_idx++, joint_l_partial_col);
+            fill_vertical_tile_bf16<mask_tile_size_bytes>(noc, cb_mask_in, tile_idx++, joint_l_partial_col);
         }
     }
 
@@ -541,13 +541,17 @@ void generate_lightweight_mask_tiles() {
 
 template <uint32_t tile_bytes>
 inline void fill_custom_diagonal_tile_bfp4(
-    uint32_t cb_id, uint32_t tile_id, int32_t leading_diagonal_offset, int32_t trailing_diagonal_offset) {
+    const Noc& noc,
+    uint32_t cb_id,
+    uint32_t tile_id,
+    int32_t leading_diagonal_offset,
+    int32_t trailing_diagonal_offset) {
     // Assert that we're not in a case where the entire tile should be fully masked or fully allowed
     // Those cases should be handled before calling this function
     ASSERT(leading_diagonal_offset >= -32 && trailing_diagonal_offset >= -32);
 
     // Clear the tile first
-    fill_tile_zeros<tile_bytes>(cb_id, tile_id);
+    fill_tile_zeros<tile_bytes>(noc, cb_id, tile_id);
 
     /**
      * In bfp4_b, -inf is represented as 0xF exp and 0xC mantissa.
@@ -670,14 +674,14 @@ inline void fill_custom_diagonal_tile_bfp4(
 }
 
 template <uint32_t tile_bytes>
-void fill_vertical_tile_bfp4(uint32_t cb_id, uint32_t tile_id, uint32_t unpad_col_in_tile) {
+void fill_vertical_tile_bfp4(const Noc& noc, uint32_t cb_id, uint32_t tile_id, uint32_t unpad_col_in_tile) {
     /*
     This tile should be set such that tile[:, unpad_col_in_tile:] = -inf
     For block float 4 format where 8 mantissas are packed per uint32
     */
 
     // Prefill with zeros (fast)
-    fill_tile_zeros<tile_bytes>(cb_id, tile_id);
+    fill_tile_zeros<tile_bytes>(noc, cb_id, tile_id);
 
     constexpr uint32_t NEG_INF_EXP = 0xFFFFFFFF;
     constexpr uint32_t NEG_INF_MANT = 0xCCCCCCCC;  // All mantissas set to 0xC
@@ -893,7 +897,7 @@ void generate_causal_sliding_window_mask(
                     break;
                 case MaskType::PARTIAL_MASK:
                     fill_custom_diagonal_tile_bfp4<tile_bytes>(
-                        cb_mask_in, in_mask_tile_id, leading_diagonal_offset, trailing_diagonal_offset);
+                        noc, cb_mask_in, in_mask_tile_id, leading_diagonal_offset, trailing_diagonal_offset);
             }
         }
     }
@@ -942,7 +946,7 @@ void generate_noncausal_padded_mask(const Noc& noc, uint32_t Sq_chunk_t, uint32_
                 }
             } else {
                 if (vertical_tile_idx == -1) {
-                    fill_vertical_tile_bfp4<tile_bytes>(cb_mask_in, in_mask_tile_id, unpad_col_in_tile);
+                    fill_vertical_tile_bfp4<tile_bytes>(noc, cb_mask_in, in_mask_tile_id, unpad_col_in_tile);
                     vertical_tile_idx = in_mask_tile_id;
                 } else {
                     copy_tile<tile_bytes>(noc, write_ptr_base, write_ptr_base, vertical_tile_idx, in_mask_tile_id);

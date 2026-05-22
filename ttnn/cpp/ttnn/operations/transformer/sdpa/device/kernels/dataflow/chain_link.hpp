@@ -233,11 +233,21 @@ public:
                  .noc_x_end = mcast_end_x_,
                  .noc_y_end = mcast_end_y_,
                  .addr = cb_addr},
-                true);
+                true /* linked: companion semaphore mcast follows */);
+            // Companion semaphore mcast: write local valid_sem value into remote receiver_sem
+            // (different L1 offset). Semaphore<>::set_multicast assumes same L1 offset for
+            // source and destination, so we use the raw call here. Must be issued back-to-back
+            // after the linked write — inserting a flush between them deadlocks.
+            const uint64_t mcast_sem_noc_addr = ::get_noc_multicast_addr(
+                mcast_start_x_,
+                mcast_start_y_,
+                mcast_end_x_,
+                mcast_end_y_,
+                get_semaphore(receiver_sem_id_),
+                noc.get_noc_id());
+            noc_semaphore_set_multicast(
+                get_semaphore(valid_sem_id_), mcast_sem_noc_addr, mcast_num_dests_, false, noc.get_noc_id());
             noc.async_writes_flushed();
-            Semaphore<>(valid_sem_id_)
-                .template set_multicast<Noc::McastMode::EXCLUDE_SRC>(
-                    noc, mcast_start_x_, mcast_start_y_, mcast_end_x_, mcast_end_y_, mcast_num_dests_);
         } else {
             sender_sem.wait(1);
             sender_sem.set(0);

@@ -8,7 +8,7 @@
 #include "api/dataflow/noc_semaphore.h"
 #include "api/dataflow/circular_buffer.h"
 #include "api/dataflow/endpoints.h"
-#include "api/dataflow/core_local_mem.h"
+#include "api/core_local_mem.h"
 #include "dataflow_common.hpp"
 #include "exp_fused_op_indexer.hpp"
 void kernel_main() {
@@ -302,14 +302,17 @@ void kernel_main() {
                              .noc_y_end = next_physical_y,
                              .addr = cb_k_start_address},
                             true /* linked: semaphore mcast follows */);
-                        Semaphore<>(valid_semaphore_id)
-                            .template set_multicast<Noc::McastMode::EXCLUDE_SRC>(
-                                noc,
-                                prev_physical_x,
-                                prev_physical_y,
-                                next_physical_x,
-                                next_physical_y,
-                                mcast_num_dests);
+                        // Companion semaphore mcast: write local valid_sem value to remote
+                        // receiver_sem (different L1 offset). See reader_interleaved.cpp for rationale.
+                        const uint64_t mcast_sem_noc_addr = ::get_noc_multicast_addr(
+                            prev_physical_x,
+                            prev_physical_y,
+                            next_physical_x,
+                            next_physical_y,
+                            receiver_semaphore_l1_addr,
+                            noc.get_noc_id());
+                        noc_semaphore_set_multicast(
+                            valid_semaphore_l1_addr, mcast_sem_noc_addr, mcast_num_dests, false, noc.get_noc_id());
                     } else {
                         noc.async_write(
                             CoreLocalMem<uint32_t>(cb_k_start_address),
@@ -407,14 +410,16 @@ void kernel_main() {
                              .noc_y_end = next_physical_y,
                              .addr = cb_v_start_address},
                             true /* linked: semaphore mcast follows */);
-                        Semaphore<>(valid_semaphore_id)
-                            .template set_multicast<Noc::McastMode::EXCLUDE_SRC>(
-                                noc,
-                                prev_physical_x,
-                                prev_physical_y,
-                                next_physical_x,
-                                next_physical_y,
-                                mcast_num_dests);
+                        // Companion semaphore mcast — see K path above for rationale.
+                        const uint64_t mcast_sem_noc_addr = ::get_noc_multicast_addr(
+                            prev_physical_x,
+                            prev_physical_y,
+                            next_physical_x,
+                            next_physical_y,
+                            receiver_semaphore_l1_addr,
+                            noc.get_noc_id());
+                        noc_semaphore_set_multicast(
+                            valid_semaphore_l1_addr, mcast_sem_noc_addr, mcast_num_dests, false, noc.get_noc_id());
                     } else {
                         noc.async_write(
                             CoreLocalMem<uint32_t>(cb_v_start_address),
