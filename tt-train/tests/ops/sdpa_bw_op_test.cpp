@@ -677,7 +677,8 @@ TEST_F(SDPABackwardTest, SmallBatch) {
 
 TEST_F(SDPABackwardTest, NIGHTLY_NanoGPTConfig) {
     // D=128 needs wider tolerance: 2x inner dim accumulation depth in BF16 matmul
-    // causes larger forward-to-backward precision cascade for dQ/dK
+    // causes larger forward-to-backward precision cascade for dQ/dK.
+    // bf16 exp adds a further precision shift in logsumexp.
     SDPABackwardTestConfig config{
         .batch_size = 64U,
         .sequence_length = 256U,
@@ -686,14 +687,16 @@ TEST_F(SDPABackwardTest, NIGHTLY_NanoGPTConfig) {
         .num_query_heads = 6U,
         .num_kv_heads = 6U,
         .dropout_prob = 0.0F,
-        .atol = 3e-2F,
-        .rtol = 3e-2F,
+        .atol = 4e-2F,
+        .rtol = 4e-2F,
         .test_name = "NanoGPTConfig (B=64, S=256, D=128, H=6)"};
     run_sdpa_backward_test(config);
 }
 
 TEST_F(SDPABackwardTest, NIGHTLY_LargerSequence) {
-    // D=128 + S=1024: wider tolerance for accumulated BF16 rounding
+    // D=128 + S=1024: wider tolerance for accumulated BF16 rounding.
+    // bf16 exp compounds with the long-sequence accumulation, pushing dQ/dK/dV
+    // error envelope toward ~8e-2.
     SDPABackwardTestConfig config{
         .batch_size = 4U,
         .sequence_length = 1024U,
@@ -702,8 +705,8 @@ TEST_F(SDPABackwardTest, NIGHTLY_LargerSequence) {
         .num_query_heads = 8U,
         .num_kv_heads = 8U,
         .dropout_prob = 0.0F,
-        .atol = 3e-2F,
-        .rtol = 3e-2F,
+        .atol = 8e-2F,
+        .rtol = 8e-2F,
         .test_name = "LargerSequence (B=4, S=512, D=128, H=8)"};
     run_sdpa_backward_test(config);
 }
@@ -737,8 +740,9 @@ TEST_F(SDPABackwardTest, TinyLlamaConfig) {
         .num_query_heads = 32U,  // num_heads from config
         .num_kv_heads = 4U,      // num_groups from config (8 query heads per kv head)
         .dropout_prob = 0.0F,
-        .atol = 2e-2F,
-        .rtol = 2e-2F,
+        // bf16 exp widens the dK/dV error envelope vs. the previous fp32 exp.
+        .atol = 3e-2F,
+        .rtol = 3e-2F,
         .test_name = "TinyLlamaConfig (B=1, S=256, D=64, qH=32, kvH=4)"};
     run_sdpa_backward_test(config);
 }
