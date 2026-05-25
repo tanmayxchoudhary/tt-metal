@@ -106,8 +106,10 @@ jobs:
       volumes:
         - ${{ github.workspace }}/docker-job:/work # Subdir to workaround https://github.com/actions/runner/issues/691
         - /dev/hugepages-1G:/dev/hugepages-1G
-        - /mnt/MLPerf:/mnt/MLPerf${{ inputs.mlperf-read-only && ':ro' || ':rw' }}
-      options: "--device /dev/tenstorrent --privileged -v /sys:/sys"
+        # bh_quietbox_2 and bh_p300 use a local cache root instead of /mnt/MLPerf.
+        - ${{ (matrix.test-group.sku == 'bh_quietbox_2' || matrix.test-group.sku == 'bh_p300') && format('/localdev/blackhole_demos/huggingface_data:/mnt/MLPerf/huggingface{0}', inputs.mlperf-read-only && ':ro' || ':rw') || format('/mnt/MLPerf:/mnt/MLPerf{0}', inputs.mlperf-read-only && ':ro' || ':rw') }}
+        - ${{ matrix.test-group.sku == 'bh_p300' && format('/localdev/blackhole_demos/huggingface_data:/localdev/blackhole_demos/huggingface_data{0}', inputs.mlperf-read-only && ':ro' || ':rw') || '/no_lfc_cache' }}
+      options: "--device /dev/tenstorrent --privileged -v /sys:/sys -e TT_GH_CI_INFRA"
     defaults:
       run:
         shell: bash
@@ -124,6 +126,13 @@ jobs:
         with:
           build-artifact-name: ${{ inputs.build-artifact-name }}
           wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
+      - name: Download Llama model weights from LFC
+        if: ${{ matrix.test-group.sku == 'bh_p300' && contains(matrix.test-group.name, 'Llama 3.1-8B') }}
+        timeout-minutes: 15
+        run: |
+          set -e
+          mkdir -p /localdev/blackhole_demos/huggingface_data/meta-llama
+          wget -r -nH -x --cut-dirs=5 -np --progress=dot:giga -R "index.html*" -P /localdev/blackhole_demos/huggingface_data/meta-llama http://yyz2-lfcache564.yyz2.tenstorrent.com/mldata/model_checkpoints/pytorch/huggingface/meta-llama/Llama-3.1-8B-Instruct/
       - name: ${{ matrix.test-group.name }}
         timeout-minutes: ${{ matrix.test-group.timeout }}
         run: |

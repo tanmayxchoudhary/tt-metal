@@ -17,7 +17,6 @@ on:
           - all
           - whisper
           - llama3.1-8b
-          - llama3-8b
           - unet-shallow
           - stable_diffusion_xl
           - llama3.3-70b
@@ -32,7 +31,6 @@ on:
           - gpt-oss-120b
           - mochi
           - flux.1-dev
-          - mochi
           - wan2.2-t2v-a14b
           - z-image-turbo
       system-type:

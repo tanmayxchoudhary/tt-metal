@@ -396,6 +396,9 @@
     wh_n150:
       timeout: 10
       tier: 1
+    bh_p150:
+      timeout: 10
+      tier: 1
     # wh_n300:
     #   timeout: 15
     #   tier: 1

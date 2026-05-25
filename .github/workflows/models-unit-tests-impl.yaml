@@ -109,13 +109,14 @@ jobs:
         - /dev/hugepages-1G:/dev/hugepages-1G
         # bh_p150 / bh_loudbox / bh_galaxy[_perf] and the WH SKUs run on machines
         # that host the canonical HF / tt_cache layout under /mnt/MLPerf, so the
-        # standard mount works as-is. bh_quietbox_2 is a local-disk BH runner
+        # standard mount works as-is. bh_quietbox_2 and bh_p300 are local-disk BH runners
         # whose equivalent layout lives at /localdev/blackhole_demos/huggingface_data
         # — map that host path onto /mnt/MLPerf/huggingface inside the container
         # so a single test cmd referencing /mnt/MLPerf/... resolves on both
         # cache modes.
-        - ${{ matrix.test-group.sku == 'bh_quietbox_2' && format('/localdev/blackhole_demos/huggingface_data:/mnt/MLPerf/huggingface{0}', inputs.mlperf-read-only && ':ro' || ':rw') || format('/mnt/MLPerf:/mnt/MLPerf{0}', inputs.mlperf-read-only && ':ro' || ':rw') }}
-      options: "--device /dev/tenstorrent --privileged -v /sys:/sys"
+        - ${{ (matrix.test-group.sku == 'bh_quietbox_2' || matrix.test-group.sku == 'bh_p300') && format('/localdev/blackhole_demos/huggingface_data:/mnt/MLPerf/huggingface{0}', inputs.mlperf-read-only && ':ro' || ':rw') || format('/mnt/MLPerf:/mnt/MLPerf{0}', inputs.mlperf-read-only && ':ro' || ':rw') }}
+        - ${{ matrix.test-group.sku == 'bh_p300' && format('/localdev/blackhole_demos/huggingface_data:/localdev/blackhole_demos/huggingface_data{0}', inputs.mlperf-read-only && ':ro' || ':rw') || '/no_lfc_cache' }}
+      options: "--device /dev/tenstorrent --privileged -v /sys:/sys -e TT_GH_CI_INFRA"
     defaults:
       run:
         shell: bash
@@ -132,6 +133,13 @@ jobs:
         with:
           build-artifact-name: ${{ inputs.build-artifact-name }}
           wheel-artifact-name: ${{ inputs.wheel-artifact-name }}
+      - name: Download Llama model weights from LFC
+        if: ${{ matrix.test-group.sku == 'bh_p300' && contains(matrix.test-group.name, 'Llama 3.1-8B') }}
+        timeout-minutes: 15
+        run: |
+          set -e
+          mkdir -p /localdev/blackhole_demos/huggingface_data/meta-llama
+          wget -r -nH -x --cut-dirs=5 -np --progress=dot:giga -R "index.html*" -P /localdev/blackhole_demos/huggingface_data/meta-llama http://yyz2-lfcache564.yyz2.tenstorrent.com/mldata/model_checkpoints/pytorch/huggingface/meta-llama/Llama-3.1-8B-Instruct/
       - name: ${{ matrix.test-group.name }}
         timeout-minutes: ${{ matrix.test-group.timeout }}
         run: |
