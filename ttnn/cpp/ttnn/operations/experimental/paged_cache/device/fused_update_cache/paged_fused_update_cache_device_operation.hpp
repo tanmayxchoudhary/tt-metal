@@ -7,6 +7,8 @@
 #include <optional>
 #include <variant>
 
+#include <tt_stl/reflection.hpp>
+
 #include "ttnn/tensor/tensor.hpp"
 #include "paged_fused_update_cache_device_operation_types.hpp"
 #include "paged_tiled_fused_update_cache_program_factory.hpp"

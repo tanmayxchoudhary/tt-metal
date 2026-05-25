@@ -7,6 +7,8 @@
 #include <functional>
 #include <optional>
 
+#include <tt_stl/reflection.hpp>
+
 #include "ttnn/tensor/tensor.hpp"
 #include "paged_fill_cache_program_factory.hpp"
 
