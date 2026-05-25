@@ -12,8 +12,12 @@
 #include "api/compute/eltwise_binary.h"
 #include "api/compute/layernorm.h"
 
-ALWI void ACQ() { acquire_dst(); }
-ALWI void REL() { release_dst(); }
+ALWI void ACQ() { tile_regs_acquire(); }
+ALWI void REL() {
+    tile_regs_commit();
+    tile_regs_wait();
+    tile_regs_release();
+}
 
 void kernel_main() {
     const uint32_t NCHt = get_arg_val<uint32_t>(0);
