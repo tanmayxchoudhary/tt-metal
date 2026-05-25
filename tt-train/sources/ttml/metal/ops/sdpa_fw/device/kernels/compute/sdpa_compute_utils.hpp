@@ -199,7 +199,7 @@ void exp_full_tile(uint32_t idst) {
             /*CLAMP_NEGATIVE*/ false,
             DST_ACCUM_MODE>,
         idst,
-        (int)VectorMode::RC,
+        VectorMode::RC,
         scale_bf16);
 #endif  // TRISC_MATH
 }
