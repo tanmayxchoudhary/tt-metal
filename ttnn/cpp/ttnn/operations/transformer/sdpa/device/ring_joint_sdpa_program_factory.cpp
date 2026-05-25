@@ -189,6 +189,48 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     const uint32_t DHt = DH / tt::constants::TILE_WIDTH;
     const uint32_t vDHt = vDH / tt::constants::TILE_WIDTH;
     const uint32_t logical_nt = tt::div_up(static_cast<uint32_t>(args.logical_n), tt::constants::TILE_HEIGHT);
+    const bool kv_pad_rotation_enabled = args.has_kv_pad_rotation();
+    const uint32_t kv_actual_nt = kv_pad_rotation_enabled ? args.kv_actual_isl.value() / tt::constants::TILE_HEIGHT : 0;
+    const uint32_t new_actual_nt = kv_pad_rotation_enabled ? logical_nt - kv_actual_nt : 0;
+    uint32_t kv_pad_q_old_start_nt = 0;
+    uint32_t kv_pad_q_old_count_nt = 0;
+    uint32_t kv_pad_q_new_start_nt = 0;
+    uint32_t kv_pad_q_valid_nt = 0;
+    if (kv_pad_rotation_enabled) {
+        const uint32_t old_capacity_nt = ring_size * q_local_padded_Nt;
+        const uint32_t old_pad_nt = old_capacity_nt > kv_actual_nt ? old_capacity_nt - kv_actual_nt : 0;
+        const uint32_t old_fill_nt = std::min(old_pad_nt, new_actual_nt);
+
+        const auto old_fill_on_device = [&](uint32_t chip) {
+            const uint32_t fill_start_nt = kv_actual_nt;
+            const uint32_t fill_end_nt = kv_actual_nt + old_fill_nt;
+            const uint32_t chip_start_nt = chip * q_local_padded_Nt;
+            const uint32_t chip_end_nt = chip_start_nt + q_local_padded_Nt;
+            const uint32_t start_nt = std::max(fill_start_nt, chip_start_nt);
+            const uint32_t end_nt = std::min(fill_end_nt, chip_end_nt);
+            return end_nt > start_nt ? end_nt - start_nt : 0;
+        };
+
+        kv_pad_q_old_count_nt = old_fill_on_device(device_index);
+        if (kv_pad_q_old_count_nt > 0) {
+            kv_pad_q_old_start_nt = std::max(kv_actual_nt, device_index * q_local_padded_Nt);
+        }
+
+        uint32_t remaining_new_nt = new_actual_nt - old_fill_nt;
+        uint32_t new_prefix_nt = 0;
+        for (uint32_t chip = 0; chip < device_index && remaining_new_nt > 0; ++chip) {
+            const uint32_t chip_old_fill_nt = old_fill_on_device(chip);
+            const uint32_t chip_new_capacity_nt = q_local_padded_Nt - chip_old_fill_nt;
+            const uint32_t take_nt = std::min(chip_new_capacity_nt, remaining_new_nt);
+            new_prefix_nt += take_nt;
+            remaining_new_nt -= take_nt;
+        }
+
+        const uint32_t device_new_capacity_nt = q_local_padded_Nt - kv_pad_q_old_count_nt;
+        const uint32_t q_new_count_nt = std::min(device_new_capacity_nt, remaining_new_nt);
+        kv_pad_q_new_start_nt = kv_actual_nt + old_fill_nt + new_prefix_nt;
+        kv_pad_q_valid_nt = kv_pad_q_old_count_nt + q_new_count_nt;
+    }
 
     /*
     For non-causal case we must provide a padded mask if the K sequence length has been padded
@@ -380,6 +422,10 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
 
     // Ring-joint streaming supports single-Q-subblock shapes; only fp32 dest acc stays on the legacy path.
     const bool use_streaming_compute = !fp32_dest_acc_en;
+    TT_FATAL(
+        !kv_pad_rotation_enabled || use_streaming_compute,
+        "kv_actual_isl requires the ring-joint streaming compute path; the compute_common.hpp path selected by "
+        "fp32_dest_acc_en=true is not supported.");
     log_debug(
         tt::LogOp,
         "use_streaming_compute: {} (is_causal={}, Sq_chunk_t={}, Sk_chunk_t={}, sbh={}, sbw={})",
@@ -494,7 +540,7 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         kernel_is_causal,
         args.is_balanced,
         static_cast<uint32_t>(enable_zigzag_balancing),
-        // Reader slot 24: chunked_enabled (writer/compute use slot 24/33 for use_streaming_compute).
+        // Reader slot 24: chunked_enabled. Writer/compute use their corresponding slot for use_streaming_compute.
         static_cast<uint32_t>(is_chunked),
         num_active_cores,
         chunk_size_t,
@@ -654,7 +700,12 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         args.is_balanced,
         static_cast<uint32_t>(enable_zigzag_balancing),
         static_cast<uint32_t>(is_chunked),
-        chunk_size_t};
+        chunk_size_t,
+        static_cast<uint32_t>(kv_pad_rotation_enabled),
+        kv_pad_q_old_start_nt,
+        kv_pad_q_old_count_nt,
+        kv_pad_q_new_start_nt,
+        kv_pad_q_valid_nt};
 
     std::map<std::string, std::string> defines;
     defines["STATS_GRANULARITY"] = std::to_string(stats_granularity);

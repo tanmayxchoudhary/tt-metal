@@ -13,6 +13,14 @@
 #include "compute_streaming.hpp"
 #include "cpp/ttnn/operations/transformer/sdpa/device/kernels/dataflow/fused_op_indexer.hpp"
 
+template <bool kv_pad_rotation_enabled>
+constexpr void assert_kv_pad_rotation_streaming_only() {
+    static_assert(
+        !kv_pad_rotation_enabled,
+        "kv_actual_isl requires the ring-joint streaming compute path; the compute_common.hpp path selected by "
+        "fp32_dest_acc_en=true is not supported.");
+}
+
 void kernel_main() {
     constexpr uint32_t B = get_compile_time_arg_val(0);
     constexpr uint32_t NH = get_compile_time_arg_val(1);
@@ -56,6 +64,11 @@ void kernel_main() {
     constexpr bool use_zigzag_balancing = get_compile_time_arg_val(38) == 1;
     constexpr bool chunked_enabled = get_compile_time_arg_val(39) == 1;
     constexpr uint32_t chunk_size_t = get_compile_time_arg_val(40);
+    constexpr bool kv_pad_rotation_enabled = get_compile_time_arg_val(41) == 1;
+    constexpr uint32_t kv_pad_q_old_start_nt = get_compile_time_arg_val(42);
+    constexpr uint32_t kv_pad_q_old_count_nt = get_compile_time_arg_val(43);
+    constexpr uint32_t kv_pad_q_new_start_nt = get_compile_time_arg_val(44);
+    constexpr uint32_t kv_pad_q_valid_nt = get_compile_time_arg_val(45);
     // Diagonal-mask tile slot is shared by the kernel's is_causal path and the chunked-prefill
     // path. kernel_is_causal is masked off by the program factory when chunked is on, so only
     // one of the two paths drives the stamp per program — but they share the CB slot layout.
@@ -93,7 +106,7 @@ void kernel_main() {
     constexpr uint32_t qk_chunk_tiles = Sq_chunk_t * Sk_chunk_t;
     constexpr uint32_t out_chunk_tiles = Sq_chunk_t * vDHt;
 
-    constexpr uint32_t cb_arg_offset = 41;
+    constexpr uint32_t cb_arg_offset = 46;
     constexpr uint32_t cb_q_in = get_compile_time_arg_val(cb_arg_offset + 0);
     constexpr uint32_t cb_k_in = get_compile_time_arg_val(cb_arg_offset + 1);
     constexpr uint32_t cb_v_in = get_compile_time_arg_val(cb_arg_offset + 2);
@@ -161,7 +174,6 @@ void kernel_main() {
 
         // First, find out if this ring iter processes any KV chunks.
         const uint32_t ring_iter_kv_start_tile = ring_id * kv_local_padded_Nt;
-        const uint32_t ring_iter_kv_end_tile = ring_iter_kv_start_tile + num_local_k_chunks * Sk_chunk_t;
         // Last tile id holding any real K data; partial trailing tile is included here and gets
         // its padding cells masked downstream (see same line in ring_joint_reader.cpp).
         const uint32_t global_n_tile_id = logical_nt - 1;
@@ -277,7 +289,8 @@ void kernel_main() {
                 global_n_has_padding,
                 local_n_has_padding,
                 joint_has_padding,
-                has_straddle && is_causal && is_balanced>(
+                has_straddle && is_causal && is_balanced,
+                kv_pad_rotation_enabled>(
                 global_q_start,
                 global_q_end,
                 iter_num_kv_chunks,
@@ -298,9 +311,16 @@ void kernel_main() {
                 lw_mask,
                 skip_first_half_q,
                 use_zigzag_balancing,
-                ChunkedContext{q_start_idx_t, ring_index},
+                ChunkedContext{
+                    q_start_idx_t,
+                    ring_index,
+                    kv_pad_q_old_start_nt,
+                    kv_pad_q_old_count_nt,
+                    kv_pad_q_new_start_nt,
+                    kv_pad_q_valid_nt},
                 is_first_active_iter);
         } else {
+            assert_kv_pad_rotation_streaming_only<kv_pad_rotation_enabled>();
             sdpa_ring<
                 cb_qk_im,
                 cb_identity_scale_in,
@@ -369,7 +389,13 @@ void kernel_main() {
                 skip_first_half_q,
                 is_last_ring_iter,
                 use_zigzag_balancing,
-                ChunkedContext{q_start_idx_t, ring_index});
+                ChunkedContext{
+                    q_start_idx_t,
+                    ring_index,
+                    kv_pad_q_old_start_nt,
+                    kv_pad_q_old_count_nt,
+                    kv_pad_q_new_start_nt,
+                    kv_pad_q_valid_nt});
         }
     }
 }

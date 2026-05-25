@@ -107,7 +107,7 @@ struct RingIdSequencer {
  * @param is_balanced         Whether balanced (zigzag) causal distribution is enabled
  * @param chunked_enabled     Whether balanced chunked-prefill layout is active. When
  *                            true, every iter holds one slab of real data per chunk
- *                            → every iter does work.
+ *                            and does work.
  */
 inline uint32_t find_last_active_ring_iter(
     RingIdSequencer seq,
@@ -128,8 +128,9 @@ inline uint32_t find_last_active_ring_iter(
         uint32_t ring_id = seq.get_next_ring_id(no_sync);
         bool does_joint = (ring_id == seq.ring_size - 1);
         uint32_t kv_start = ring_id * local_padded_Nt;
-        bool does_work = ((kv_start <= last_n_tile_id) || (does_joint && L != 0)) &&
-                         !(is_causal && seq.ring_index < ring_id && !is_balanced);
+        bool has_kv_work = kv_start <= last_n_tile_id;
+        bool does_work =
+            (has_kv_work || (does_joint && L != 0)) && !(is_causal && seq.ring_index < ring_id && !is_balanced);
         if (does_work) {
             last_active = t;
         }

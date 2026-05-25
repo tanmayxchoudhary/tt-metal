@@ -37,7 +37,7 @@ void kernel_main() {
     constexpr uint32_t is_causal = get_compile_time_arg_val(21);
     constexpr uint32_t is_balanced = get_compile_time_arg_val(22);
     constexpr bool use_zigzag_balancing = get_compile_time_arg_val(23) == 1;
-    // Reader's slot-24 carries chunked_enabled; writer/compute use slot-24/33 for use_streaming_compute.
+    // Reader's slot-24 carries chunked_enabled.
     constexpr bool chunked_enabled = get_compile_time_arg_val(24) == 1;
     constexpr uint32_t num_q_readers = get_compile_time_arg_val(25);
     constexpr uint32_t chunk_size_t = get_compile_time_arg_val(26);
@@ -276,7 +276,7 @@ void kernel_main() {
         // Last tile id holding any real (non-padding) K data (logical_nt is ceil(logical_n / TILE_H)).
         // When logical_n is not tile-aligned, this tile is partially real — its padding cells are
         // stamped to -inf by the lightweight mask later, so we still include it as active here.
-        // Chunked-prefill: balanced layout puts one slab of real K per chunk on every device → every iter is active.
+        // Chunked-prefill has one real K slab per chunk on every device.
         const uint32_t global_n_tile_id = logical_nt - 1;
         const uint32_t ring_iter_kv_start_tile = ring_id * kv_local_padded_Nt;
         const bool ring_iter_processes_KV_chunks =
