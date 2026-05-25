@@ -561,6 +561,15 @@ bool should_coalesce_1d_depthwise_conv_reads(
         kernel_width <= 1 || dilation_w != 1) {
         return false;
     }
+    // The coalesced path lays out activations as (channels_ntiles * kw) tiles, where each
+    // channel occupies exactly one tile-column (TILE_WIDTH scalars).  This requires
+    // round_up(C * kw, TILE_WIDTH) == (C / TILE_WIDTH) * kw * TILE_WIDTH, which only holds
+    // when C is a multiple of TILE_WIDTH.  When C < TILE_WIDTH the reader packs all taps into
+    // round_up(C*kw, TILE_WIDTH) scalars (<< kw tiles), violating the compute kernel's
+    // static_assert(in0_block_w % kernel_width == 0).  Fall back to the non-coalesced path.
+    if (input_channels_padded % tt::constants::TILE_WIDTH != 0) {
+        return false;
+    }
 
     // Halo output consumed by conv is row-major FLOAT32 only for FLOAT32 input, BFLOAT16 otherwise.
     const uint32_t conv_input_datum_size = input_datatype == DataType::FLOAT32 ? 4 : 2;
