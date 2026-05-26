@@ -156,13 +156,11 @@ void MoEComputeDeviceOperation::validate_on_program_cache_miss(
         tiles_per_step >= 2 && tiles_per_step % 2 == 0, "tiles_per_step ({}) must be even and >= 2", tiles_per_step);
 
     // Validate that dynamic core placement succeeds for this hidden size and combine grid.
-    // mux_core_range_set comes from combine_params when in Full mode (already checked has_value above).
+    // mux_core_range_set comes from combine_params when in Full mode; ComputeOnly uses an empty set.
+    const CoreRangeSet validate_mux_cores =
+        args.combine_params.has_value() ? args.combine_params->mux_core_range_set : CoreRangeSet{};
     ttnn::operations::ccl::common::select_moe_compute_cores(
-        mesh_device,
-        combine_token_parallel_cores,
-        combine_data_parallel_cores,
-        hidden_size,
-        args.combine_params->mux_core_range_set);
+        mesh_device, combine_token_parallel_cores, combine_data_parallel_cores, hidden_size, validate_mux_cores);
 }
 
 MoEComputeDeviceOperation::spec_return_value_t MoEComputeDeviceOperation::compute_output_specs(

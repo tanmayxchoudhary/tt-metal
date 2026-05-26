@@ -324,7 +324,7 @@ MoEComputeMeshWorkloadFactory::create_at(
                 combine_data_parallel_cores,
                 hidden_size,
                 args.bh_ring_size,
-                args.combine_params->mux_core_range_set);
+                args.combine_params.has_value() ? args.combine_params->mux_core_range_set : CoreRangeSet{});
 
     const uint32_t tilize_num_cores = tilize_core_range_set.num_cores();
     const uint32_t matmul_num_cores = matmul_core_range_set.num_cores();
