@@ -154,14 +154,23 @@ def _run_moe_compute_single_card_test(
     # CREATE TILIZE INPUT TENSORS AND GOLDENS
     #########################################
 
-    # Drain tilize core: the op uses `max_tilize_cores[0]` from the per-arch layout
-    # table (`get_layout()` in moe_compute_program_factory.cpp). WH full-grid -> (6,9);
-    # BH 11x10 -> (10,9). Harvested grids are skipped above, so y>=10 always holds here.
-    if arch == ttnn.device.Arch.BLACKHOLE:
-        tilize_drain_core = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(10, 9), ttnn.CoreCoord(10, 9))})
-    else:
-        # WORMHOLE_B0 (other archs are skipped above).
-        tilize_drain_core = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(6, 9), ttnn.CoreCoord(6, 9))})
+    # Drain tilize core: use dynamic core placement API to get the drain core
+    # instead of hardcoding per-arch coordinates. This works on both WH and BH
+    # and adapts to harvested grids (when supported).
+    drain_core_coord = ttnn.experimental.get_moe_tilize_drain_core(
+        mesh_device,
+        output_height_shard_dim,
+        output_width_shard_dim,
+        hidden_size,
+    )
+    tilize_drain_core = ttnn.CoreRangeSet(
+        {
+            ttnn.CoreRange(
+                ttnn.CoreCoord(drain_core_coord.x, drain_core_coord.y),
+                ttnn.CoreCoord(drain_core_coord.x, drain_core_coord.y),
+            )
+        }
+    )
 
     expert_mapping = gen_expert_mapping(
         num_devices, num_replicated_devices, cluster_axis, experts, experts_per_cluster, experts_per_device
@@ -401,7 +410,7 @@ def _run_moe_compute_single_card_test(
         }
     )
     output_shard_cores = ttnn.experimental.get_moe_combine_cores(
-        mesh_device, output_height_shard_dim, output_width_shard_dim
+        mesh_device, output_height_shard_dim, output_width_shard_dim, hidden_size
     )
 
     base_pcc_threshold = _get_base_pcc_threshold(activation_type, has_bias)
