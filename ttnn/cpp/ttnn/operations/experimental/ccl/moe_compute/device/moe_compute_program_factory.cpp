@@ -345,6 +345,15 @@ MoEComputeMeshWorkloadFactory::create_at(
     const uint32_t tilize_bounding_box_num_cores = tilize_bounding_box.size();
     const uint32_t matmul_bounding_box_num_cores = matmul_bounding_box.size();
 
+    // noc_async_write_multicast (non-loopback) excludes the sender from destinations.
+    // When a tilize core that multicasts is inside the matmul bounding box rectangle,
+    // the hardware delivers to (matmul_bounding_box_num_cores - 1) destinations, so
+    // num_dests must reflect that.  With DispatchCoreAxis::ROW the matmul bounding box
+    // can span the entire worker grid, which includes the tilize cores.
+    const bool tilize_sender_in_matmul_bbox = matmul_bounding_box.intersects(tilize_bounding_box);
+    const uint32_t matmul_mcast_num_dests =
+        tilize_sender_in_matmul_bbox ? matmul_bounding_box_num_cores - 1 : matmul_bounding_box_num_cores;
+
     // All worker cores bounding box
     const CoreRange all_worker_cores_bounding_box = all_worker_cores_range_set.bounding_box();
     const uint32_t all_worker_cores_bounding_box_num_cores = all_worker_cores_bounding_box.size();
@@ -863,7 +872,7 @@ MoEComputeMeshWorkloadFactory::create_at(
         {"matmul_mcast_start_y", (uint32_t)matmul_mcast_start_physical.y},
         {"matmul_mcast_end_x", (uint32_t)matmul_mcast_end_physical.x},
         {"matmul_mcast_end_y", (uint32_t)matmul_mcast_end_physical.y},
-        {"matmul_bounding_box_num_cores", matmul_bounding_box_num_cores},
+        {"matmul_bounding_box_num_cores", matmul_mcast_num_dests},
 
         // All worker cores multicast coordinates
         // TODO(#41827): when path == ComputeOnly, this bounding box still includes the

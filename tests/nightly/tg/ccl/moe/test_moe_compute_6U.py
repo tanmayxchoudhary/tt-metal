@@ -39,6 +39,12 @@ MESH_GRAPH_DESC_1x16 = (
 MESH_GRAPH_DESC_1x8 = (
     "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_1x8_torus_graph_descriptor.textproto"
 )
+MESH_GRAPH_DESC_16x1 = (
+    "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_16x1_torus_graph_descriptor.textproto"
+)
+MESH_GRAPH_DESC_8x1 = (
+    "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_8x1_torus_graph_descriptor.textproto"
+)
 # FYI: These tests also work in a MESH_GRAPH_DESC_1x4 setting (~1 minute to set up), but not in a 1x2 setting.
 
 
@@ -53,6 +59,13 @@ def is_mesh_graph_descriptor_set(expected_path):
 
 MOE_DEVICE_PARAMS = {
     "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
+    "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+    "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
+    "trace_region_size": 500000,
+}
+
+MOE_DEVICE_PARAMS_ROW = {
+    "dispatch_core_axis": ttnn.DispatchCoreAxis.ROW,
     "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
     "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
     "trace_region_size": 500000,
@@ -130,9 +143,28 @@ _MODELS_1x8 = [
 MODELS_1x16 = _expand_model_configs(_MODELS_1x16)
 MODELS_1x8 = _expand_model_configs(_MODELS_1x8)
 
+# fmt: off
+_MODELS_16x1_ROW = [
+    MoEModelConfig("deepseek_v3", N=2048, hidden_size=7168, selected_experts_k=8, has_bias_values=(False,), test_modes=("correctness",)),
+]
+_MODELS_8x1_ROW = [
+    MoEModelConfig("gpt_oss", N=2880, hidden_size=2880, selected_experts_k=4, experts_per_device_values=(4,), has_bias_values=(True,), test_modes=("correctness",), activation_types=(MoEActivationFunction.SWIGLU,)),
+]
+# fmt: on
+MODELS_16x1_ROW = _expand_model_configs(_MODELS_16x1_ROW)
+MODELS_8x1_ROW = _expand_model_configs(_MODELS_8x1_ROW)
+
 
 def _run_model_test(
-    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+    mesh_device,
+    mesh_shape,
+    enable_trace,
+    model_cfg,
+    test_mode,
+    has_bias,
+    experts_per_device,
+    activation_type,
+    cluster_axis=1,
 ):
     if test_mode == "perf":
         selected_experts_k = 1
@@ -146,7 +178,7 @@ def _run_model_test(
     run_moe_compute_test(
         mesh_device=mesh_device,
         mesh_shape=mesh_shape,
-        cluster_axis=1,
+        cluster_axis=cluster_axis,
         experts_per_device=experts_per_device,
         tokens_per_device=model_cfg.tokens_per_device,
         selected_experts_k=selected_experts_k,
@@ -1894,6 +1926,60 @@ def test_moe_compute_1x8(
 ):
     _run_model_test(
         mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parametrized model tests — ROW dispatch (16x1 mesh)
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_16x1),
+    reason=f"16x1 ROW tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_16x1}",
+)
+@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_ROW], indirect=True)
+@pytest.mark.parametrize("mesh_shape, mesh_device", [((16, 1), (16, 1))], indirect=["mesh_device"])
+@pytest.mark.parametrize("enable_trace", [pytest.param(False, id="disable_trace")])
+@pytest.mark.parametrize("model_cfg, test_mode, has_bias, experts_per_device, activation_type", MODELS_16x1_ROW)
+def test_moe_compute_16x1_row(
+    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+):
+    _run_model_test(
+        mesh_device,
+        mesh_shape,
+        enable_trace,
+        model_cfg,
+        test_mode,
+        has_bias,
+        experts_per_device,
+        activation_type,
+        cluster_axis=0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parametrized model tests — ROW dispatch (8x1 mesh)
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_8x1),
+    reason=f"8x1 ROW tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_8x1}",
+)
+@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_ROW], indirect=True)
+@pytest.mark.parametrize("mesh_shape, mesh_device", [((8, 1), (8, 1))], indirect=["mesh_device"])
+@pytest.mark.parametrize("enable_trace", [pytest.param(False, id="disable_trace")])
+@pytest.mark.parametrize("model_cfg, test_mode, has_bias, experts_per_device, activation_type", MODELS_8x1_ROW)
+def test_moe_compute_8x1_row(
+    mesh_device, mesh_shape, enable_trace, model_cfg, test_mode, has_bias, experts_per_device, activation_type
+):
+    _run_model_test(
+        mesh_device,
+        mesh_shape,
+        enable_trace,
+        model_cfg,
+        test_mode,
+        has_bias,
+        experts_per_device,
+        activation_type,
+        cluster_axis=0,
     )
 
 
