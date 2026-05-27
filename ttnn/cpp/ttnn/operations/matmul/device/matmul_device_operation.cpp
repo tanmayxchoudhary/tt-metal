@@ -40,17 +40,6 @@ void check_tensor_in_grid(const Tensor& tensor, const CoreCoord& grid_size) {
     }
 }
 
-void check_tensor_in_core_range_set(const Tensor& tensor, const CoreRangeSet& allowed_cores) {
-    if (tensor.memory_config().is_sharded() && tensor.memory_config().buffer_type() != BufferType::DRAM) {
-        const auto& shard_grid = tensor.memory_config().shard_spec().value().grid;
-        TT_FATAL(
-            allowed_cores.contains(shard_grid),
-            "Tensor shard spec grid {} must lie within allowed_worker_cores {}",
-            shard_grid,
-            allowed_cores);
-    }
-}
-
 void validate_matmul_matrix_dimensions(
     const ttnn::Shape& a_shape,
     const ttnn::Shape& b_shape,
@@ -284,24 +273,6 @@ void validate_matmul_compute_grid_and_per_core_dims(
                 }
                 validate_matmul_nonzero_block_dims(
                     program_config.in0_block_w, program_config.per_core_M, program_config.per_core_N);
-            }
-        },
-        chosen_program_config);
-}
-
-void validate_matmul_sharded_operand_grids_within_program_compute_grid(
-    const Tensor& input_tensor_a,
-    const Tensor& input_tensor_b,
-    const operations::matmul::MatmulProgramConfig& chosen_program_config) {
-    std::visit(
-        [&](const auto& program_config) {
-            using ProgramConfigType = std::decay_t<decltype(program_config)>;
-            if constexpr (std::is_same_v<ProgramConfigType, operations::matmul::MatmulMultiCoreReuseProgramConfig>) {
-                TT_FATAL(
-                    program_config.allowed_worker_cores.has_value(),
-                    "allowed_worker_cores must be set before validation");
-                check_tensor_in_core_range_set(input_tensor_a, program_config.allowed_worker_cores.value());
-                check_tensor_in_core_range_set(input_tensor_b, program_config.allowed_worker_cores.value());
             }
         },
         chosen_program_config);
@@ -666,8 +637,6 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
     validate_matmul_block_and_subblock_configuration(attributes, chosen_program_config);
 
     validate_matmul_compute_grid_and_per_core_dims(input_tensor_a, chosen_program_config);
-    validate_matmul_sharded_operand_grids_within_program_compute_grid(
-        input_tensor_a, input_tensor_b, chosen_program_config);
     validate_matmul_work_distribution_and_gather_ring_topology(
         input_tensor_a,
         a_shape_padded,
