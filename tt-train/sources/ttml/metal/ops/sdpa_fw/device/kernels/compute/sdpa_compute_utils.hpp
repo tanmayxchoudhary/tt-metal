@@ -234,6 +234,87 @@ inline void exp_full_tile_init() {
 #endif
 }
 
+// Arch-dispatched scaled-exp wrappers used by SDPA's K/V loop.
+//   WH: the 21f bf16 TTI exp polynomial misbehaves when reached multiple times
+//       per kernel invocation (deterministic NaN at the last processed sequence
+//       row; root cause not pinned — see
+//       `notes/sdpa-21f-bf16-tti-investigation.md`). Workaround: pre-multiply
+//       by the scaler in sfpi inline, then call the sfpi 21f exp polynomial
+//       directly (avoiding the TTI variant entirely).
+//   BH: the `LREG12 = scaler*(1/log2)` fold works correctly and uses the
+//       fast hand-unrolled TTI polynomial — one SFPU op fewer per element.
+#ifdef TRISC_MATH
+namespace _sdpa_detail {
+template <int ITERATIONS, bool is_fp32_dest_acc_en>
+inline void mul_then_sfpi_exp_full(uint16_t scale_bf16) {
+    for (int d = 0; d < ITERATIONS; d++) {
+        sfpi::vFloat val = sfpi::dst_reg[0];
+        val = val * sfpi::sFloat16b(static_cast<uint32_t>(scale_bf16));
+        sfpi::vFloat result = ckernel::sfpu::_sfpu_exp_21f_bf16_<is_fp32_dest_acc_en>(val);
+        if constexpr (!is_fp32_dest_acc_en) {
+            result = sfpi::float_to_fp16b(result, sfpi::RoundMode::NearestEven);
+        }
+        sfpi::dst_reg[0] = result;
+        sfpi::dst_reg++;
+    }
+}
+
+template <uint16_t scale_bf16>
+inline void mul_then_sfpi_exp_first_column() {
+    constexpr int ITERATIONS_HALF_FACE = 4;
+#ifdef ARCH_BLACKHOLE
+    addr_mod_t{
+        .srca = {.incr = 0},
+        .srcb = {.incr = 0},
+        .dest = {.incr = 4},
+    }
+        .set(ADDR_MOD_6);
+#endif
+    for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
+        sfpi::vFloat val = sfpi::dst_reg[0];
+        val = val * sfpi::sFloat16b(static_cast<uint32_t>(scale_bf16));
+        sfpi::vFloat result = ckernel::sfpu::_sfpu_exp_21f_bf16_<DST_ACCUM_MODE>(val);
+        if constexpr (!DST_ACCUM_MODE) {
+            result = sfpi::float_to_fp16b(result, sfpi::RoundMode::NearestEven);
+        }
+        sfpi::dst_reg[0] = result;
+        sfpi::dst_reg += 2;
+    }
+}
+}  // namespace _sdpa_detail
+#endif  // TRISC_MATH
+
+template <uint32_t scaler_fp32>
+inline void sdpa_exp_full_tile_scaled(uint32_t idst) {
+#ifdef ARCH_WORMHOLE
+    // WH: sets LREG12 = 1/log(2) for the sfpi polynomial (no scale fold).
+    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ false>();
+    constexpr uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_fp32 >> 16);
+#ifdef TRISC_MATH
+    _llk_math_eltwise_unary_sfpu_params_(
+        _sdpa_detail::mul_then_sfpi_exp_full</*ITERATIONS*/ 8, DST_ACCUM_MODE>, idst, VectorMode::RC, scaler_bf16);
+#endif
+#elif defined(ARCH_BLACKHOLE)
+    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ true, scaler_fp32>();
+    exp_full_tile(idst);
+#endif
+}
+
+template <uint32_t scaler_fp32>
+inline void sdpa_exp_tile_first_column_scaled(uint32_t idst) {
+#ifdef ARCH_WORMHOLE
+    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ false>();
+    constexpr uint16_t scaler_bf16 = static_cast<uint16_t>(scaler_fp32 >> 16);
+#ifdef TRISC_MATH
+    _llk_math_eltwise_unary_sfpu_params_(
+        _sdpa_detail::mul_then_sfpi_exp_first_column<scaler_bf16>, idst, VectorMode::C);
+#endif
+#elif defined(ARCH_BLACKHOLE)
+    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ true, scaler_fp32>();
+    MATH((exp_tile_first_column(idst)));
+#endif
+}
+
 /* We process data by one tile, because we read only one row of K
  * Maybe we can read two rows of K and V and then process data by subblocks*/
 template <uint32_t scaler_fp32>
@@ -248,11 +329,10 @@ void apply_exp_inplace_and_find_exp_sum(uint32_t cb_attention_weights, uint32_t 
     sub_tiles_bcast_cols(
         cb_attention_weights, cb_cur_max, /* tile_idx */ 0, /* tile_idx */ 0, /* dst_reg_idx */ exp_dst_idx);
 
-    // Fused scale+exp: compute exp(scale * (score - max)) in a single SFPU pass.
-    // The init pre-loads LREG12 = scale*(1/log(2)) so the standard polynomial
-    // does scale and exp in one MAD — no SFPMULI per iteration.
-    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ true, scaler_fp32>();
-    exp_full_tile(exp_dst_idx);
+    // Scaled exp: compute exp(scale * (score - max)). WH pre-multiplies via
+    // mul_unary_tile then calls unscaled exp (workaround); BH uses the
+    // LREG12 = scale*(1/log2) fold (one SFPU op fewer per element).
+    sdpa_exp_full_tile_scaled<scaler_fp32>(exp_dst_idx);
 
     tile_regs_commit();
 
@@ -325,13 +405,10 @@ void update_exp_max_diff(uint32_t cb_prev_max_value, uint32_t cb_cur_max_value, 
         /* tile_idx */ 0,
         /* dst_reg_idx */ exp_max_diff_dst_idx);
 
-    // First-column fused scale+exp: exp(scale * (prev_max - cur_max)).
+    // First-column scaled exp: exp(scale * (prev_max - cur_max)).
     // Both max values are column vectors, so the result is a column vector —
     // only column 0 has data. Process 4× fewer SFPU iterations than full-tile exp.
-    // Scale is folded into LREG12 by the templated init; the inner loop runs
-    // unscaled.
-    exp_full_tile_init</*approx*/ false, /*SCALE_EN*/ true, scaler_fp32>();
-    MATH((exp_tile_first_column(exp_max_diff_dst_idx)));
+    sdpa_exp_tile_first_column_scaled<scaler_fp32>(exp_max_diff_dst_idx);
     tile_regs_commit();
 
     tile_regs_wait();
