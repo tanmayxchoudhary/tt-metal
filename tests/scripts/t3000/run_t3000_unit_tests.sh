@@ -77,12 +77,12 @@ run_t3000_ttfabric_tests() {
 
   ./build/test/tt_metal/tt_fabric/fabric_unit_tests --gtest_filter=T3k*MeshGraphFabric2DDynamicTests*
 
-  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_fabric_sanity_common.yaml
-  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_fabric_sanity_at_least_2x2_mesh.yaml
-  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_fabric_ubench_at_least_2x2_mesh.yaml
+  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/benchmark/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/benchmark/routing/test_fabric_sanity_common.yaml
+  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/benchmark/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/benchmark/routing/test_fabric_sanity_at_least_2x2_mesh.yaml
+  TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/benchmark/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/benchmark/routing/test_fabric_ubench_at_least_2x2_mesh.yaml
 
   # Code profiling test
-  TT_FABRIC_PROFILE_RX_CH_FWD=1 TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_fabric_code_profiling.yaml
+  TT_FABRIC_PROFILE_RX_CH_FWD=1 TT_METAL_CLEAR_L1=1 ./build/test/tt_metal/tt_fabric/benchmark/routing/test_tt_fabric --test_config ${TT_METAL_HOME}/tests/tt_metal/tt_fabric/benchmark/routing/test_fabric_code_profiling.yaml
 
   # Record the end time
   end_time=$(date +%s)
@@ -142,7 +142,7 @@ run_t3000_ttnn_udm_tests() {
 
 run_t3000_tt_metal_multiprocess_tests() {
   local mpi_args="--allow-run-as-root"
-  tt-run --mpi-args "$mpi_args" --rank-binding tests/tt_metal/distributed/config/2x2_multiprocess_rank_bindings.yaml ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric --test_config tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_t3k_2x2.yaml
+  tt-run --mpi-args "$mpi_args" --rank-binding tests/tt_metal/distributed/config/2x2_multiprocess_rank_bindings.yaml ./build/test/tt_metal/tt_fabric/benchmark/routing/test_tt_fabric --test_config tests/tt_metal/tt_fabric/benchmark/routing/test_t3k_2x2.yaml
   tt-run --mpi-args "$mpi_args" --rank-binding tests/tt_metal/distributed/config/2x2_multiprocess_rank_bindings.yaml ./build/test/tt_metal/multi_host_fabric_tests
   tt-run --mpi-args "$mpi_args" --rank-binding tests/tt_metal/distributed/config/2x2_strict_connection_multi_process_rank_bindings.yaml  ./build/test/tt_metal/multi_host_fabric_tests
   tt-run --mpi-args "$mpi_args" --rank-binding tests/tt_metal/distributed/config/2x2_multiprocess_rank_bindings.yaml ./build/test/tt_metal/test_mesh_socket_main --test_config tests/tt_metal/multihost/fabric_tests/mesh_socket_t3k_2x2.yaml

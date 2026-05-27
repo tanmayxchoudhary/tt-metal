@@ -71,10 +71,10 @@ struct ConnectionKeyHash {
 enum class TestWorkerType : uint8_t { SENDER, RECEIVER, SYNC, MUX };
 
 struct Connection {
-    std::set<CoreCoord> sender_cores;           // Data senders (full-size channels)
-    std::set<CoreCoord> receiver_cores;         // Credit senders (header-only channels)
-    std::set<CoreCoord> sync_cores;             // Sync senders (header-only channels)
-    std::map<CoreCoord, uint32_t> channel_map;  // Core -> channel assignment
+    std::set<CoreCoord> sender_cores;                       // Data senders (full-size channels)
+    std::set<CoreCoord> receiver_cores;                     // Credit senders (header-only channels)
+    std::set<CoreCoord> sync_cores;                         // Sync senders (header-only channels)
+    std::map<CoreCoord, uint32_t> channel_map;              // Core -> channel assignment
     std::map<CoreCoord, TestWorkerType> core_worker_types;  // Core -> worker type mapping
     bool needs_mux = false;
 };
@@ -426,8 +426,8 @@ private:
 
     std::unordered_map<CoreCoord, TestSender> senders_;
     std::unordered_map<CoreCoord, TestReceiver> receivers_;
-    std::unordered_map<CoreCoord, TestSync> sync_workers_;    // Separate sync cores
-    std::unordered_map<CoreCoord, TestMux> muxes_;            // Mux workers
+    std::unordered_map<CoreCoord, TestSync> sync_workers_;  // Separate sync cores
+    std::unordered_map<CoreCoord, TestMux> muxes_;          // Mux workers
 
     bool benchmark_mode_ = false;
     bool global_sync_ = false;
