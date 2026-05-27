@@ -278,22 +278,6 @@ void validate_matmul_compute_grid_and_per_core_dims(
         chosen_program_config);
 }
 
-void validate_matmul_sharded_operand_grids_within_program_compute_grid(
-    const Tensor& input_tensor_a,
-    const Tensor& input_tensor_b,
-    const operations::matmul::MatmulProgramConfig& chosen_program_config) {
-    std::visit(
-        [&](const auto& program_config) {
-            using ProgramConfigType = std::decay_t<decltype(program_config)>;
-            if constexpr (std::is_same_v<ProgramConfigType, operations::matmul::MatmulMultiCoreReuseProgramConfig>) {
-                const auto& grid = program_config.compute_with_storage_grid_size;
-                check_tensor_in_grid(input_tensor_a, grid);
-                check_tensor_in_grid(input_tensor_b, grid);
-            }
-        },
-        chosen_program_config);
-}
-
 void validate_matmul_work_distribution_and_gather_ring_topology(
     const Tensor& input_tensor_a,
     const ttnn::Shape& a_shape_padded,
@@ -653,8 +637,6 @@ void MatmulDeviceOperation::validate_on_program_cache_miss(
     validate_matmul_block_and_subblock_configuration(attributes, chosen_program_config);
 
     validate_matmul_compute_grid_and_per_core_dims(input_tensor_a, chosen_program_config);
-    validate_matmul_sharded_operand_grids_within_program_compute_grid(
-        input_tensor_a, input_tensor_b, chosen_program_config);
     validate_matmul_work_distribution_and_gather_ring_topology(
         input_tensor_a,
         a_shape_padded,
