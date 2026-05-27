@@ -50,6 +50,7 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: 15
         with:
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
@@ -126,6 +127,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: 15
       - name: Push dev docker image to GHCR with release tag
         uses: ./.github/actions/push-latest-image-to-ghcr
         with:

@@ -26,6 +26,7 @@ jobs:
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
+        timeout-minutes: 15
         with:
           sparse-checkout: |
             .github
@@ -86,6 +87,7 @@ jobs:
     steps:
       - name: 🧬 Checkout Repository
         uses: actions/checkout@v4
+        timeout-minutes: 15
         with:
           submodules: recursive
           path: docker-job

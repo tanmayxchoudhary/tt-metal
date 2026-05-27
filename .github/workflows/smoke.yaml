@@ -51,6 +51,7 @@ jobs:
     steps:
       - name: Checkout actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: 15
         with:
           sparse-checkout: .github/actions/download-artifact-with-retry
           sparse-checkout-cone-mode: false
@@ -164,6 +165,7 @@ jobs:
 
       - name: Checkout repository for Codecov mapping
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: 15
         if: ${{ inputs.upload-coverage }}
         with:
           submodules: recursive
