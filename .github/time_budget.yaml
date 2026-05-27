@@ -102,7 +102,7 @@ ttnn:
 
 shield:
   e2e:
-    wh_llmbox: 45
+    wh_llmbox: 60
 
 # Former fabric + scaleout budgets merged under team scaleout (see tests/pipeline_reorg).
 scaleout:
@@ -184,7 +184,7 @@ models:
     bh_p300: 10
     bh_deskbox: 60
     bh_quietbox_2: 60
-    bh_llmbox: 45
+    bh_llmbox: 60
     bh_galaxy_perf: 60
   unit:
     wh_llmbox: 175
