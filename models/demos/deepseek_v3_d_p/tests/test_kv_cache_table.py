@@ -46,7 +46,7 @@ from tests.ttnn.utils_for_testing import assert_equal
 @pytest.mark.parametrize("use_pretrained", [False, True], ids=["random", "pretrained"])
 @pytest.mark.parametrize("seq_len", [25 * 1024], ids=["seq25k"])
 @pytest.mark.timeout(0)  # Disable timeout — first run computes and caches CPU reference for large seq lengths
-def test_mla_disaggregation(
+def test_kv_cache_table(
     use_pretrained,
     request,
     mesh_device,
