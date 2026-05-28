@@ -29,6 +29,16 @@ Optional:
     --factory-descriptor-path <path>        Path to factory system descriptor file (overrides --config defaults;
                                             when provided, cabling and deployment descriptors are ignored)
                                             (8x16 default: /data/scaleout_configs/5xBH_8x16_intrapod/fsd.textproto)
+    --output-path <dir>                     Directory for validation artifacts (default: recover_output).
+                                            Used as run_cluster_validation's --output-path so the
+                                            unretrainable_channels.yaml artifact lands in a known location.
+    --no-regenerate-on-failure              Disable automatic descriptor regeneration after an unrecoverable
+                                            validation failure. By default, when run_cluster_validation
+                                            exhausts its retrain budget and emits unretrainable_channels.yaml,
+                                            recover.sh invokes run_regen_descriptors to write a degraded
+                                            descriptor set (FSD + cabling + deployment) to <output-path>/regenerated.
+                                            Regen is skipped automatically when only --factory-descriptor-path is
+                                            in use (cabling+deployment are required inputs).
     --help                                  Display this help message and exit
 
 Example:
@@ -48,6 +58,8 @@ SLEEP_DURATION=5
 SKIP_RESET=false
 SKIP_VALIDATION=false
 SEND_TRAFFIC=true
+OUTPUT_PATH="recover_output"
+REGENERATE_ON_FAILURE=true
 
 CABLING_DESCRIPTOR_PATH_DEFAULT="/data/scaleout_configs/bh_glx_exabox/cabling_descriptor.textproto"
 DEPLOYMENT_DESCRIPTOR_PATH_DEFAULT="/data/scaleout_configs/bh_glx_exabox/deployment_descriptor.textproto"
@@ -149,6 +161,18 @@ while [[ $# -gt 0 ]]; do
             FACTORY_DESCRIPTOR_PATH="$2"
             shift 2
             ;;
+        --output-path)
+            if [[ -z "$2" ]] || [[ "$2" == --* ]]; then
+                echo "Error: --output-path requires a non-empty value"
+                exit 1
+            fi
+            OUTPUT_PATH="$2"
+            shift 2
+            ;;
+        --no-regenerate-on-failure)
+            REGENERATE_ON_FAILURE=false
+            shift
+            ;;
         --help)
             show_help
             exit 0
@@ -215,8 +239,12 @@ echo "Send traffic: $SEND_TRAFFIC"
 echo "Sleep after reset: ${SLEEP_DURATION}s"
 echo "Skip reset: $SKIP_RESET"
 echo "Skip validation: $SKIP_VALIDATION"
+echo "Output path: $OUTPUT_PATH"
+echo "Regenerate on failure: $REGENERATE_ON_FAILURE"
 echo "=========================================="
 echo ""
+
+mkdir -p "$OUTPUT_PATH"
 
 # Step 1: tt-smi reset
 if [[ "$SKIP_RESET" == false ]]; then
@@ -231,34 +259,65 @@ else
 fi
 
 # Step 2: Cluster validation
+VALIDATION_EXIT=0
 if [[ "$SKIP_VALIDATION" == false ]]; then
     VALIDATION_ARGS=("${DESCRIPTOR_ARGS[@]}")
     if [[ "$SEND_TRAFFIC" == true ]]; then
         VALIDATION_ARGS+=(--send-traffic)
     fi
     VALIDATION_ARGS+=(--num-iterations "$NUM_ITERATIONS")
+    VALIDATION_ARGS+=(--output-path "$OUTPUT_PATH")
 
     echo ""
     echo "Running cluster validation..."
+
+    # Capture validation exit code without tripping `set -e` so we can run regen on failure
+    # before propagating. `|| VAR=$?` is in conditional context, so set -e is suspended.
     if [[ -n "$DOCKER_IMAGE" ]]; then
         ./tools/scaleout/exabox/mpi-docker --image "$DOCKER_IMAGE" \
             --empty-entrypoint \
             --volume /data/scaleout_configs \
             --host "$HOSTS" \
             ./build/tools/scaleout/run_cluster_validation \
-            "${VALIDATION_ARGS[@]}"
+            "${VALIDATION_ARGS[@]}" || VALIDATION_EXIT=$?
     else
         mpirun --host "$HOSTS" \
             --mca btl_tcp_if_exclude docker0,lo,tailscale0 \
             --tag-output \
             ./build/tools/scaleout/run_cluster_validation \
-            "${VALIDATION_ARGS[@]}"
+            "${VALIDATION_ARGS[@]}" || VALIDATION_EXIT=$?
     fi
 else
     echo "Skipping validation (--skip-validation)"
+fi
+
+# Step 3: Regenerate descriptors if validation hit unrecoverable state
+if [[ "$REGENERATE_ON_FAILURE" == true && $VALIDATION_EXIT -ne 0 ]]; then
+    UNRETRAINABLE_YAML="$OUTPUT_PATH/unretrainable_channels.yaml"
+    if [[ -f "$UNRETRAINABLE_YAML" ]]; then
+        if [[ -z "$CABLING_DESCRIPTOR_PATH" || -z "$DEPLOYMENT_DESCRIPTOR_PATH" ]]; then
+            echo ""
+            echo "Skipping descriptor regeneration: requires --cabling-descriptor-path and"
+            echo "--deployment-descriptor-path (cannot regenerate from --factory-descriptor-path alone)."
+        else
+            REGEN_DIR="$OUTPUT_PATH/regenerated"
+            echo ""
+            echo "Validation exited unrecoverable; regenerating descriptors without unretrainable cables..."
+            ./build/tools/scaleout/run_regen_descriptors \
+                --cabling "$CABLING_DESCRIPTOR_PATH" \
+                --deployment "$DEPLOYMENT_DESCRIPTOR_PATH" \
+                --unretrainable-channels "$UNRETRAINABLE_YAML" \
+                --output-dir "$REGEN_DIR" || echo "Warning: descriptor regeneration failed (see error above)"
+        fi
+    fi
 fi
 
 echo ""
 echo "=========================================="
 echo "Recovery completed at $(date)"
 echo "=========================================="
+
+# Propagate validation's exit code so callers still see the failure
+if [[ $VALIDATION_EXIT -ne 0 ]]; then
+    exit "$VALIDATION_EXIT"
+fi
