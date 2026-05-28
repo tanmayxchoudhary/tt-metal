@@ -556,6 +556,10 @@ def test_prefill_transformer(
             test_params=test_params,
         )
 
+    logger.info(
+        f"Params: pcc_validation={pcc_validation}, return_kv_cache={return_kv_cache}, do_return_kv={do_return_kv} is_balanced={is_balanced} ref_kvpe_list={ref_kvpe_list is not None}"
+    )
+
     # --- PCC check ---
     if pcc_validation:
         profiler.start("pcc_validation")
