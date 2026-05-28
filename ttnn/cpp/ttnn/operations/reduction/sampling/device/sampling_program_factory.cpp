@@ -102,8 +102,14 @@ ttnn::device_operation::ProgramArtifacts SamplingProgramFactory::create_program_
         tt::tt_metal::datatype_to_dataformat_converter(input_values_tensor.dtype());
     tt::DataFormat input_indices_cb_data_format =
         tt::tt_metal::datatype_to_dataformat_converter(input_indices_tensor.dtype());
-    tt::DataFormat index_cb_data_format = tt::DataFormat::UInt16;
+    // Quasar does not support UInt16 DFB metadata; keep index intermediates in 32-bit format.
+    tt::DataFormat index_cb_data_format = tt::DataFormat::Int32;
     tt::DataFormat k_cb_data_format = tt::tt_metal::datatype_to_dataformat_converter(k.dtype());
+    // Quasar does not support UInt32 DFB metadata. k values are non-negative and fit in
+    // signed 32-bit, so represent this staging DFB as Int32 for compatibility.
+    if (k_cb_data_format == tt::DataFormat::UInt32) {
+        k_cb_data_format = tt::DataFormat::Int32;
+    }
     tt::DataFormat p_cb_data_format = tt::tt_metal::datatype_to_dataformat_converter(p.dtype());
     tt::DataFormat temp_cb_data_format = tt::tt_metal::datatype_to_dataformat_converter(temp.dtype());
 
@@ -115,9 +121,12 @@ ttnn::device_operation::ProgramArtifacts SamplingProgramFactory::create_program_
     auto input_shape = input_values_tensor.logical_shape();
     const uint32_t tile_height = input_values_tensor.tensor_spec().tile().get_height();
     const uint32_t tile_width = input_values_tensor.tensor_spec().tile().get_width();
-    uint32_t Ht = (input_shape[0] * input_shape[1] * input_shape[2]) / tile_height;
+    // uint32_t Ht = (input_shape[0] * input_shape[1] * input_shape[2]) / tile_height;
+    uint32_t Ht = 1;
+    const uint32_t num_users = input_shape[0] * input_shape[1] * input_shape[2];
     uint32_t Wt = input_shape[3] / tile_width;
-    uint32_t num_cores = Ht * tile_height;
+    // uint32_t num_cores = Ht * tile_height;
+    uint32_t num_cores = num_users;
 
     auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
     CoreRangeSet core_grid = tt::tt_metal::num_cores_to_corerangeset(num_cores, compute_with_storage_grid_size, true);
@@ -208,6 +217,7 @@ ttnn::device_operation::ProgramArtifacts SamplingProgramFactory::create_program_
         {"Wt", Wt},
         {"input_indices_page_size", aligned_final_indices_rm_unit_size},
         {"tile_height", tile_height},
+        {"num_users", num_users},
     };
     reader_spec.dfb_bindings = {
         ProducerDFB(DFB_INPUT_VALUES, "cb_input_values"),
@@ -236,6 +246,7 @@ ttnn::device_operation::ProgramArtifacts SamplingProgramFactory::create_program_
         {"out_stick_size", aligned_out0_unit_size},
         {"ids_per_batch", tile_width},
         {"num_cores", num_cores},
+        {"num_users", num_users},
     };
     // cb_out / cb_k / cb_p are writer-local staging — writer pushes via push_back but no
     // other kernel calls wait_front. Add ghost CONSUMER bindings on the writer itself so

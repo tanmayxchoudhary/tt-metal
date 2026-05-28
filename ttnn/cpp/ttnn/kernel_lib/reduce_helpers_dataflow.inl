@@ -279,6 +279,12 @@ FORCE_INLINE void prepare_reduce_scaler(float scaler_f, uint32_t valid_reduce_di
         }
     }
 
+#if defined(ARCH_QUASAR) && defined(COMPILE_FOR_DM)
+    {
+        constexpr uint32_t tile_size_bytes = get_tile_size(cb_id);
+        flush_l2_cache_range(write_addr, tile_size_bytes);
+    }
+#endif
     dfb.push_back(1);
 }
 
