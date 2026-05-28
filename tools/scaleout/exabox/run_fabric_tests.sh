@@ -19,9 +19,9 @@ Optional:
                                         4x32 default: tt_metal/fabric/mesh_graph_descriptors/32x4_quad_bh_galaxy_torus_xy_graph_descriptor.textproto
                                         8x16 default: tt_metal/fabric/mesh_graph_descriptors/16x8_quad_bh_galaxy_torus_xy_graph_descriptor.textproto
     --test-binary <path>                Path to test binary
-                                        (default: ./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric)
+                                        (default: ./build/test/tt_metal/tt_fabric/test_infra/test_tt_fabric)
     --test-config <path>                Path to test configuration file
-                                        (default: tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_bh_glx_2d_torus_stability.yaml)
+                                        (default: tests/tt_metal/tt_fabric/test_infra/test_yamls/test_bh_glx_2d_torus_stability.yaml)
     --filter <pattern>                  Filter pattern passed to test_tt_fabric --filter
     --help                              Display this help message and exit
 
@@ -41,8 +41,8 @@ MESH_GRAPH_DESC_PATH_8x16="tt_metal/fabric/mesh_graph_descriptors/16x8_quad_bh_g
 CONFIG="4x32"
 MESH_GRAPH_DESC_PATH=""
 MESH_GRAPH_DESC_PATH_EXPLICIT=false
-TEST_BINARY="./build/test/tt_metal/tt_fabric/tt_fabric_tests/routing/test_tt_fabric"
-TEST_CONFIG="tests/tt_metal/tt_fabric/tt_fabric_tests/test_yamls/test_bh_glx_2d_torus_stability.yaml"
+TEST_BINARY="./build/test/tt_metal/tt_fabric/test_infra/test_tt_fabric"
+TEST_CONFIG="tests/tt_metal/tt_fabric/test_infra/test_yamls/test_bh_glx_2d_torus_stability.yaml"
 FILTER=""
 
 while [[ $# -gt 0 ]]; do
