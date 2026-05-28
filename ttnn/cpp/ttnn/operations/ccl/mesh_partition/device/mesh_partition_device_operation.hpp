@@ -46,6 +46,7 @@ struct MeshPartitionDeviceOperation {
         using SliceSharedVariables = std::variant<
             prim::SliceRmProgramFactory::shared_variables_t,
             prim::SliceRmShardedProgramFactory::shared_variables_t,
+            prim::SliceRmShardedWidthTrimProgramFactory::shared_variables_t,
             prim::SliceRmStrideProgramFactory::shared_variables_t,
             prim::SliceTileProgramFactory::shared_variables_t,
             prim::SliceTileTensorArgsProgramFactory::shared_variables_t>;

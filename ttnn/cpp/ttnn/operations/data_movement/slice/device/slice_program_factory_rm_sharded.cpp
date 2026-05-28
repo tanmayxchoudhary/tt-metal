@@ -9,6 +9,8 @@
 #include <optional>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
+#include <tt-metalium/work_split.hpp>
 
 using namespace tt::constants;
 using namespace tt::tt_metal;
@@ -305,6 +307,118 @@ void SliceRmShardedProgramFactory::override_runtime_arguments(
 
     UpdateDynamicCircularBufferAddress(cached_program.program, cached_program.shared_variables.cb_src0, *src_buffer_a);
     UpdateDynamicCircularBufferAddress(cached_program.program, cached_program.shared_variables.cb_output, *dst_buffer);
+}
+
+// SliceRmShardedWidthTrimProgramFactory
+//
+// HEIGHT_SHARDED ROW_MAJOR last-dim-only slice.  Two output paths:
+//
+//   L1 HS output: each core trims its local shard into a globally-allocated
+//     output CB — no cross-core NOC reads, output stays in L1.
+//
+//   DRAM output: each core reads from its local HS shard and writes trimmed
+//     sticks directly to DRAM interleaved via noc_async_write. No output CB
+//     is allocated, so this path adds zero extra L1 pressure.
+//
+// Handles both width-trim (begins[last]=0) and tail-trim (begins[last]>0)
+// via src_offset_bytes = begins[last] * element_size.
+
+SliceRmShardedWidthTrimProgramFactory::cached_program_t SliceRmShardedWidthTrimProgramFactory::create(
+    const SliceParams& args, const SliceInputs& tensor_args, Tensor& output) {
+    const auto& input = tensor_args.input;
+    tt::tt_metal::Program program = tt::tt_metal::CreateProgram();
+
+    auto shard_spec_in = input.shard_spec().value();
+    uint32_t shard_height  = shard_spec_in.shape[0];
+    uint32_t in_stick_size = shard_spec_in.shape[1] * input.element_size();
+    auto&    all_cores     = shard_spec_in.grid;
+    bool     row_major     = shard_spec_in.orientation == ShardOrientation::ROW_MAJOR;
+
+    uint32_t rank = input.padded_shape().rank();
+    uint32_t src_offset_bytes = (rank > 0) ? args.slice_start[rank - 1] * input.element_size() : 0;
+
+    bool output_is_dram = !output.is_sharded();
+
+    uint32_t out_stick_size;
+    if (output_is_dram) {
+        out_stick_size = output.padded_shape()[-1] * output.element_size();
+    } else {
+        out_stick_size = output.shard_spec().value().shape[1] * output.element_size();
+    }
+
+    tt::DataFormat in_data_fmt = tt::tt_metal::datatype_to_dataformat_converter(input.dtype());
+
+    uint32_t src0_cb_index = 0;
+    tt::tt_metal::CircularBufferConfig cb_src0_config =
+        tt::tt_metal::CircularBufferConfig(shard_height * in_stick_size, {{src0_cb_index, in_data_fmt}})
+            .set_page_size(src0_cb_index, in_stick_size)
+            .set_globally_allocated_address(*input.buffer());
+    auto cb_src0 = tt::tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
+
+    tt::tt_metal::CBHandle cb_output{};
+    tt::tt_metal::KernelHandle writer_kernel{};
+
+    if (output_is_dram) {
+        // DRAM path: write trimmed sticks from L1 HS shard to DRAM interleaved.
+        // No output CB is needed — src is directly addressable via get_read_ptr(cb_in).
+        std::vector<uint32_t> ct_args = {in_stick_size, out_stick_size, shard_height, src_offset_bytes};
+        TensorAccessorArgs(*output.buffer()).append_to(ct_args);
+
+        writer_kernel = tt::tt_metal::CreateKernel(
+            program,
+            "ttnn/cpp/ttnn/operations/data_movement/slice/device/kernels/dataflow/"
+            "slice_reader_unary_unpad_width_rm_sharded_to_interleaved.cpp",
+            all_cores,
+            tt::tt_metal::WriterDataMovementConfig(ct_args));
+
+        // Per-core runtime args: DRAM buffer address and starting stick index.
+        // Use the same core traversal order as the HEIGHT_SHARDED data assignment
+        // (row_major = ROW_MAJOR shard orientation → traverse cores row-first).
+        uint32_t dst_addr = output.buffer()->address();
+        auto all_cores_vec = corerange_to_cores(all_cores, std::nullopt, row_major);
+        for (uint32_t i = 0; i < static_cast<uint32_t>(all_cores_vec.size()); ++i) {
+            tt::tt_metal::SetRuntimeArgs(
+                program, writer_kernel, all_cores_vec[i],
+                {dst_addr, i * shard_height});
+        }
+    } else {
+        // L1 HS path: trim into a globally-allocated output CB.
+        tt::DataFormat out_data_fmt = tt::tt_metal::datatype_to_dataformat_converter(output.dtype());
+        uint32_t output_cb_index = tt::CBIndex::c_16;
+        tt::tt_metal::CircularBufferConfig cb_output_config =
+            tt::tt_metal::CircularBufferConfig(shard_height * out_stick_size, {{output_cb_index, out_data_fmt}})
+                .set_page_size(output_cb_index, out_stick_size)
+                .set_globally_allocated_address(*output.buffer());
+        cb_output = tt::tt_metal::CreateCircularBuffer(program, all_cores, cb_output_config);
+
+        std::vector<uint32_t> ct_args = {in_stick_size, out_stick_size, shard_height, src_offset_bytes};
+        tt::tt_metal::CreateKernel(
+            program,
+            "ttnn/cpp/ttnn/operations/data_movement/slice/device/kernels/dataflow/"
+            "slice_reader_unary_unpad_width_rm_sharded.cpp",
+            all_cores,
+            tt::tt_metal::ReaderDataMovementConfig(ct_args));
+    }
+
+    return {std::move(program), {cb_src0, cb_output, writer_kernel, output_is_dram, row_major, all_cores, shard_height}};
+}
+
+void SliceRmShardedWidthTrimProgramFactory::override_runtime_arguments(
+    cached_program_t& cached_program, const SliceParams& /*args*/, const SliceInputs& tensor_args, Tensor& output) {
+    auto& sv = cached_program.shared_variables;
+    UpdateDynamicCircularBufferAddress(
+        cached_program.program, sv.cb_src0, *tensor_args.input.buffer());
+    if (sv.output_is_dram) {
+        // Update the DRAM destination address in runtime args for every core.
+        uint32_t dst_addr = output.buffer()->address();
+        for (const CoreCoord& core : corerange_to_cores(sv.all_cores, std::nullopt, sv.row_major)) {
+            auto& rt = GetRuntimeArgs(cached_program.program, sv.writer_kernel, core);
+            rt[0] = dst_addr;
+        }
+    } else {
+        UpdateDynamicCircularBufferAddress(
+            cached_program.program, sv.cb_output, *output.buffer());
+    }
 }
 
 }  // namespace ttnn::prim

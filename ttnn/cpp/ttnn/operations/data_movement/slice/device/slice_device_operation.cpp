@@ -244,6 +244,26 @@ SliceDeviceOperation::program_factory_t SliceDeviceOperation::select_program_fac
 
     if (input.layout() == Layout::ROW_MAJOR) {
         if (input.is_sharded()) {
+            // HEIGHT_SHARDED last-dim-only slice: each core trims its own shard
+            // with a byte offset; no cross-core reads needed.
+            // Covers width-trim (begins[last]=0) and tail-trim (begins[last]>0).
+            bool is_hs = input.memory_config().memory_layout() ==
+                         tt::tt_metal::TensorMemoryLayout::HEIGHT_SHARDED;
+            uint32_t rank = input.padded_shape().rank();
+            bool outer_dims_unaffected = true;
+            for (uint32_t i = 0; i + 1 < rank; ++i) {
+                if (args.slice_start[i] != 0 ||
+                    args.slice_end[i] != input.padded_shape()[i]) {
+                    outer_dims_unaffected = false;
+                    break;
+                }
+            }
+            bool last_dim_trimmed = rank > 0 &&
+                (args.slice_end[rank - 1] - args.slice_start[rank - 1]) <
+                    input.padded_shape()[rank - 1];
+            if (is_hs && !has_step && outer_dims_unaffected && last_dim_trimmed) {
+                return SliceRmShardedWidthTrimProgramFactory{};
+            }
             return SliceRmShardedProgramFactory{};
         }
         if (has_step) {

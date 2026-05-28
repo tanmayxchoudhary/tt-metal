@@ -36,6 +36,7 @@ struct SliceDeviceOperation {
     using program_factory_t = std::variant<
         SliceRmProgramFactory,
         SliceRmShardedProgramFactory,
+        SliceRmShardedWidthTrimProgramFactory,
         SliceRmStrideProgramFactory,
         SliceTileProgramFactory,
         SliceTileTensorArgsProgramFactory>;
