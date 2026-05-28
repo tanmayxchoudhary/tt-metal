@@ -135,8 +135,8 @@ ProgramDescriptor PagedRowMajorFusedUpdateCacheProgramFactory::create_descriptor
 
     const uint32_t num_input_tiles = input1_shard_spec.shape[0] * input1_shard_spec.shape[1] / TILE_HW;
 
-    auto* const in1_buffer_address = input_tensor1.buffer();
-    auto* const in2_buffer_address = input_tensor2.buffer();
+    auto* const in1_buffer = input_tensor1.buffer();
+    auto* const in2_buffer = input_tensor2.buffer();
 
     const uint32_t num_cache_tiles = 2 * Wt;   // double buffered
     const uint32_t num_interm_tiles = 2 * Wt;  // double buffered
@@ -168,7 +168,7 @@ ProgramDescriptor PagedRowMajorFusedUpdateCacheProgramFactory::create_descriptor
             .data_format = input_cb_data_format,
             .page_size = input_single_tile_size,
         }}},
-        .buffer = in1_buffer_address,
+        .buffer = in1_buffer,
     });
     desc.cbs.push_back(CBDescriptor{
         .total_size = num_input_tiles * input_single_tile_size,
@@ -178,7 +178,7 @@ ProgramDescriptor PagedRowMajorFusedUpdateCacheProgramFactory::create_descriptor
             .data_format = input_cb_data_format,
             .page_size = input_single_tile_size,
         }}},
-        .buffer = in2_buffer_address,
+        .buffer = in2_buffer,
     });
     desc.cbs.push_back(CBDescriptor{
         .total_size = num_interm_tiles * interm_single_tile_size,

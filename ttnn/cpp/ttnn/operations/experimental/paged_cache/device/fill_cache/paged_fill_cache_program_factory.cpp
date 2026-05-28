@@ -6,6 +6,8 @@
 
 #include "paged_fill_cache_device_operation_types.hpp"
 
+#include <cmath>
+
 #include <tt-metalium/buffer.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/program_descriptors.hpp>

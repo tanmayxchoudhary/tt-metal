@@ -128,9 +128,9 @@ ProgramDescriptor PagedTiledFusedUpdateCacheProgramFactory::create_descriptor(
 
     uint32_t num_input_tiles = input1_shard_spec.value().shape[0] * input1_shard_spec.value().shape[1] / TILE_HW;
 
-    auto* in1_buffer_address = input1_shard_spec.has_value() ? input_tensor1.buffer() : nullptr;
+    auto* in1_buffer = input1_shard_spec.has_value() ? input_tensor1.buffer() : nullptr;
 
-    auto* in2_buffer_address = input2_shard_spec.has_value() ? input_tensor2.buffer() : nullptr;
+    auto* in2_buffer = input2_shard_spec.has_value() ? input_tensor2.buffer() : nullptr;
 
     uint32_t num_cache_tiles = 2 * Wt;   // double buffered
     uint32_t num_interm_tiles = 2 * Wt;  // double buffered
@@ -163,7 +163,7 @@ ProgramDescriptor PagedTiledFusedUpdateCacheProgramFactory::create_descriptor(
             .data_format = input_cb_data_format,
             .page_size = input_single_tile_size,
         }}},
-        .buffer = in1_buffer_address,
+        .buffer = in1_buffer,
     });
     desc.cbs.push_back(CBDescriptor{
         .total_size = num_input_tiles * input_single_tile_size,
@@ -173,7 +173,7 @@ ProgramDescriptor PagedTiledFusedUpdateCacheProgramFactory::create_descriptor(
             .data_format = input_cb_data_format,
             .page_size = input_single_tile_size,
         }}},
-        .buffer = in2_buffer_address,
+        .buffer = in2_buffer,
     });
     desc.cbs.push_back(CBDescriptor{
         .total_size = num_interm_tiles * interm_single_tile_size,

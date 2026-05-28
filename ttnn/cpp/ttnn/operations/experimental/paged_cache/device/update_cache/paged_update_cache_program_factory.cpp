@@ -116,7 +116,7 @@ ProgramDescriptor PagedUpdateCacheProgramFactory::create_descriptor(
     CoreRangeSet all_cores = shard_spec.value().grid;
     uint32_t num_cores = all_cores.num_cores();
     uint32_t num_input_tiles = shard_spec.value().shape[0] * shard_spec.value().shape[1] / TILE_HW;
-    auto* in1_buffer_address = shard_spec.has_value() ? input_tensor.buffer() : nullptr;
+    auto* in1_buffer = shard_spec.has_value() ? input_tensor.buffer() : nullptr;
 
     uint32_t num_cache_tiles = 2 * Wt;   // double buffered
     uint32_t num_interm_tiles = 2 * Wt;  // double buffered
@@ -148,7 +148,7 @@ ProgramDescriptor PagedUpdateCacheProgramFactory::create_descriptor(
             .data_format = input_cb_data_format,
             .page_size = input_single_tile_size,
         }}},
-        .buffer = in1_buffer_address,
+        .buffer = in1_buffer,
     });
     desc.cbs.push_back(CBDescriptor{
         .total_size = num_interm_tiles * interm_single_tile_size,
