@@ -150,14 +150,9 @@ void kernel_main() {
                 dest_linear_idx += dest_multi_idx[x_dim_in_dest] * dest_strides[x_dim_in_dest];
             }
 
-            // Compute the NoC address for the output
-            uint64_t dst_noc_addr = s0.get_noc_addr(dest_linear_idx, x_offset);
-
-            // Compute the L1 address from which to write (offset by W-block pages)
             uint32_t l1_addr = transposed_buffer_read_addr + (w - w_start) * output_cb_page_size;
-
-            // Perform an asynchronous write of the X-block to the destination
-            noc_async_write(l1_addr, dst_noc_addr, x_read_size_bytes);
+            tt::data_movement::common::noc_async_write_sharded(
+                l1_addr, s0, dest_linear_idx, x_offset, x_read_size_bytes);
         }
 
         // Wait until all writes are completed before proceeding to the next block

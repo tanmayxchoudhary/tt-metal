@@ -42,10 +42,17 @@ ttnn::Tensor permute_impl(
     float pad_value = 0.0f) {
     uint32_t rank = a.logical_shape().rank();
 
-    // RM width/block sharded rows span multiple cores; unshard first, then
-    // permute on interleaved data and reshard if needed.
-    const bool in_bad = is_rm_block_or_width_sharded(a);
-    const bool out_bad = a.layout() == Layout::ROW_MAJOR && is_block_or_width_sharded_mc(output_mem_config);
+    // Two temporary L1-interleaved hops for RM + BLOCK/WIDTH-sharded endpoints:
+    //   out_bad: permute writer can't split a row across shards (#32019).
+    //   in_bad:  irregular shapes only — noc_async_*_sharded helpers misread
+    //            pages_per_shard. Regular shapes go native.
+    const bool rm = a.layout() == Layout::ROW_MAJOR;
+    const bool in_sharded = is_rm_block_or_width_sharded(a);
+    const auto& input_logical = a.logical_shape();
+    const bool irregular_hw = input_logical.rank() >= 2 && (input_logical[-1] % tt::constants::TILE_WIDTH != 0 ||
+                                                            input_logical[-2] % tt::constants::TILE_HEIGHT != 0);
+    const bool in_bad = in_sharded && irregular_hw;
+    const bool out_bad = rm && !in_sharded && is_block_or_width_sharded_mc(output_mem_config);
     if (in_bad || out_bad) {
         const auto interleaved_l1 =
             MemoryConfig(tt::tt_metal::TensorMemoryLayout::INTERLEAVED, tt::tt_metal::BufferType::L1);

@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "api/dataflow/dataflow_api.h"
+#include "ttnn/operations/data_movement/common/kernels/common.hpp"
 #include "api/dataflow/circular_buffer.h"
 
 void kernel_main() {
@@ -52,8 +53,7 @@ void kernel_main() {
         }
         cb.wait_front(1);
         uint32_t l1_read_addr = cb.get_read_ptr();
-        uint64_t dst_noc_addr = s0.get_noc_addr(dest_linear_idx);
-        noc_async_write(l1_read_addr, dst_noc_addr, page_size);
+        tt::data_movement::common::noc_async_write_sharded(l1_read_addr, s0, dest_linear_idx, 0, page_size);
         noc_async_write_barrier();
         cb.pop_front(1);
     }
