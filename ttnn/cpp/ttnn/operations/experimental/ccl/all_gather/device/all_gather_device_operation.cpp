@@ -35,7 +35,10 @@ void AllGatherDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(args.dim >= -rank && args.dim < rank, "Invalid gather dim {} for {}D input tensor", args.dim, rank);
     TT_FATAL(args.ring_size > 1, "all_gather collective will only work for num_devices > 1, got {}", args.ring_size);
 
-    // TODO if mesh_shape is 2D but !FABRIC_2D, then must specify cluster_axis.
+    TT_FATAL(
+        !(::tt::tt_fabric::is_2D_topology(args.topology) &&
+          !::tt::tt_fabric::is_2d_fabric_config(::tt::tt_fabric::GetFabricConfig())),
+        "2D topology requires a 2D fabric config (FABRIC_2D / FABRIC_2D_TORUS_*)");
 
     // Constraints on persistent output tensor
     if (tensor_args.persistent_output_tensor.has_value()) {

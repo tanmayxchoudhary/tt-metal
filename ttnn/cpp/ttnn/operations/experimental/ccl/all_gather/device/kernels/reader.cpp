@@ -10,7 +10,6 @@
 #include "tt_metal/fabric/hw/inc/noc_addr.h"
 #include "tt_metal/fabric/hw/inc/packet_header_pool.h"
 #include "tt_metal/fabric/hw/inc/edm_fabric/routing_plane_connection_manager.hpp"
-#include "tt_metal/fabric/hw/inc/linear/api.h"
 #include "cpp/ttnn/operations/ccl/common/kernels/minimal_ccl_common.hpp"
 
 #include <cstdint>
@@ -22,7 +21,6 @@
 // #include "api/debug/device_print.h"
 
 using address_t = uint32_t;
-using namespace tt::tt_fabric::linear::experimental;
 
 void kernel_main() {
     ///////////////////////////////////////////////////
@@ -39,7 +37,14 @@ void kernel_main() {
     constexpr uint8_t range_hops_alt = get_compile_time_arg_val(8);
     constexpr bool load_balance_across_alt_routes = get_compile_time_arg_val(9) != 0;
     constexpr uint32_t num_connections = get_compile_time_arg_val(10);
-    constexpr auto input_tensor_args = TensorAccessorArgs<11>();
+    // 2D-only hop counts (in 1D builds these are 0 and unused).
+    // Reader handles E-line and N-rect packets. e_hops + w_hops are used as the N-rect's
+    // east/west branch widths; n_hops is the N-rect's spine length; s_hops is unused here.
+    [[maybe_unused]] constexpr uint8_t e_hops = get_compile_time_arg_val(11);
+    [[maybe_unused]] constexpr uint8_t w_hops = get_compile_time_arg_val(12);
+    [[maybe_unused]] constexpr uint8_t n_hops = get_compile_time_arg_val(13);
+    [[maybe_unused]] constexpr uint8_t s_hops = get_compile_time_arg_val(14);  // reader doesn't use S-rect
+    constexpr auto input_tensor_args = TensorAccessorArgs<15>();
     constexpr auto output_tensor_args = TensorAccessorArgs<input_tensor_args.next_compile_time_args_offset()>();
 
     constexpr bool enable_fabric = (num_connections > 0);
@@ -86,8 +91,25 @@ void kernel_main() {
         open_connections(fabric_connection, num_connections, arg_for_fab);
     }
 
+#ifdef FABRIC_2D
+    // Reader handles E-line and N-rect. Connection order matches host: E first, then N (only
+    // active ones are present, indexed 0..num_connections-1).
+    FabricRange ranges_2d[2] = {};
+    {
+        uint32_t idx = 0;
+        if constexpr (e_hops > 0) {
+            ranges_2d[idx++] = FabricRange{e_hops, 0, 0, 0};  // E-line
+        }
+        if constexpr (n_hops > 0) {
+            ranges_2d[idx++] = FabricRange{e_hops, w_hops, n_hops, 0};  // N-rect (filled rectangle)
+        }
+    }
+    FabricWriter<output_page_size, packet_size, load_balance_across_alt_routes> fabric(
+        noc, fabric_connection, num_connections, ranges_2d);
+#else
     FabricWriter<output_page_size, packet_size, load_balance_across_alt_routes> fabric(
         noc, fabric_connection, num_connections, range_hops, range_hops_alt);
+#endif
 
     // Startup barrier.
     // Reader fires forward, and also owns sem wait + reset.
@@ -96,9 +118,19 @@ void kernel_main() {
     uint64_t barrier_sem_noc_addr_in_pkt = safe_get_noc_addr(barrier_sem_noc0_x, barrier_sem_noc0_y, barrier_sem, 0);
     if constexpr (enable_fabric) {
         sem_route_id = PacketHeaderPool::allocate_header_n(num_connections);
+#ifdef FABRIC_2D
+        fabric_api::fabric_multicast_noc_unicast_atomic_inc_set_state<
+            UnicastAtomicIncUpdateMask::Val | UnicastAtomicIncUpdateMask::Flush>(
+            fabric_connection,
+            sem_route_id,
+            ranges_2d,
+            tt::tt_fabric::NocUnicastAtomicIncCommandHeader{
+                0u,    // ignore
+                1u});  // increment 1
+#else
         std::array starts = {static_cast<uint8_t>(1)};
         std::array ranges = {range_hops};
-        fabric_multicast_noc_unicast_atomic_inc_set_state<
+        fabric_api::fabric_multicast_noc_unicast_atomic_inc_set_state<
             UnicastAtomicIncUpdateMask::Val | UnicastAtomicIncUpdateMask::Flush>(
             fabric_connection,
             sem_route_id,
@@ -107,8 +139,9 @@ void kernel_main() {
             tt::tt_fabric::NocUnicastAtomicIncCommandHeader{
                 0u,    // ignore
                 1u});  // increment 1
+#endif
 
-        fabric_multicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
+        fabric_api::fabric_multicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
             fabric_connection,
             sem_route_id,
             tt::tt_fabric::NocUnicastAtomicIncCommandHeader{barrier_sem_noc_addr_in_pkt, 0});
@@ -202,7 +235,7 @@ void kernel_main() {
                 // Send Fabric data in our dir
                 for (uint32_t i = 0; i < outputs_per_cb_page && valid_output_page_id(); ++i) {
                     auto page_id = next_output_page_id();
-                    auto fabric_tensor_page_addr = tt::tt_fabric::linear::addrgen_detail::get_noc_address(
+                    auto fabric_tensor_page_addr = tt::tt_fabric::addrgen_detail::get_noc_address(
                         output_tensor_accessor, page_id, output_page_byte_offset);
                     fabric.send(l1_read_addr, fabric_tensor_page_addr);
                     l1_read_addr += output_page_size;
@@ -231,7 +264,7 @@ void kernel_main() {
             // Send Fabric data in our dir
             for (uint32_t i = 0; i < outputs_per_cb_page && valid_output_page_id(); ++i) {
                 auto page_id = next_output_page_id();
-                auto fabric_tensor_page_addr = tt::tt_fabric::linear::addrgen_detail::get_noc_address(
+                auto fabric_tensor_page_addr = tt::tt_fabric::addrgen_detail::get_noc_address(
                     output_tensor_accessor, page_id, output_page_byte_offset);
                 fabric.send(l1_read_addr, fabric_tensor_page_addr);
                 l1_read_addr += output_page_size;
@@ -283,7 +316,7 @@ void kernel_main() {
     if constexpr (enable_fabric) {
         uint64_t out_ready_sem_noc_addr_in_pkt =
             safe_get_noc_addr(out_ready_sem_noc0_x, out_ready_sem_noc0_y, out_ready_sem_bank_addr, 0);
-        fabric_multicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
+        fabric_api::fabric_multicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
             fabric_connection,
             sem_route_id,
             tt::tt_fabric::NocUnicastAtomicIncCommandHeader{out_ready_sem_noc_addr_in_pkt, 0});
