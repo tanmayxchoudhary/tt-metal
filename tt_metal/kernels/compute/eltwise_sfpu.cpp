@@ -10,45 +10,102 @@
 #include "api/dataflow/circular_buffer.h"
 
 void kernel_main() {
-#ifdef SFPU_BINARY_OP
+#ifdef SFPU_TERNARY_OP
+    // ===== Ternary SFPU path (e.g. where) =====
+    // 3 inputs → DST[0], DST[1], DST[2] → SFPU op (writes DST[0]) → pack DST[0].
+#ifdef ARCH_QUASAR
+    uint32_t per_core_block_cnt = get_arg(args::per_core_block_cnt);
+    uint32_t per_core_block_size = get_arg(args::per_core_block_size);
+    DataflowBuffer dfb_in0(dfb::in0);
+    DataflowBuffer dfb_in1(dfb::in1);
+    DataflowBuffer dfb_in2(dfb::in2);
+    DataflowBuffer dfb_out(dfb::out);
+    const uint32_t in0_id = dfb_in0.get_id();
+    const uint32_t in1_id = dfb_in1.get_id();
+    const uint32_t in2_id = dfb_in2.get_id();
+    const uint32_t out_id = dfb_out.get_id();
+#else
     uint32_t per_core_block_cnt = get_compile_time_arg_val(0);
     uint32_t per_core_block_size = get_compile_time_arg_val(1);
-    CircularBuffer buff_in0(tt::CBIndex::c_0);
-    CircularBuffer buff_in1(tt::CBIndex::c_1);
-    CircularBuffer buff_out(tt::CBIndex::c_16);
-    const uint32_t in0_id = tt::CBIndex::c_0;
-    const uint32_t in1_id = tt::CBIndex::c_1;
-    const uint32_t out_id = tt::CBIndex::c_16;
+    constexpr auto in0_id = tt::CBIndex::c_0;
+    constexpr auto in1_id = tt::CBIndex::c_1;
+    constexpr auto in2_id = tt::CBIndex::c_2;
+    constexpr auto out_id = tt::CBIndex::c_16;
+#endif
 
     init_sfpu(in0_id, out_id);
+#ifdef ARCH_QUASAR
+    // PACK((llk_pack_dest_init()));
+#endif
+
     for (uint32_t block = 0; block < per_core_block_cnt; ++block) {
         for (uint32_t i = 0; i < per_core_block_size; ++i) {
-            buff_in0.wait_front(1);
-            buff_in1.wait_front(1);
-            buff_out.reserve_back(1);
+#ifdef ARCH_QUASAR
+            dfb_in0.wait_front(1);
+            dfb_in1.wait_front(1);
+            dfb_in2.wait_front(1);
+            dfb_out.reserve_back(1);
 
             tile_regs_acquire();
 
             copy_tile_to_dst_init_short(in0_id);
-            copy_tile(in0_id, /*tile_index=*/0, /*dst_index=*/0);
+            copy_tile(in0_id, 0, 0);
             copy_tile_to_dst_init_short(in1_id);
-            copy_tile(in1_id, /*tile_index=*/0, /*dst_index=*/1);
+            copy_tile(in1_id, 0, 1);
+            copy_tile_to_dst_init_short(in2_id);
+            copy_tile(in2_id, 0, 2);
 
 #ifdef SFPU_OP_CHAIN_0
             SFPU_OP_CHAIN_0
 #endif
-
             tile_regs_commit();
 
             tile_regs_wait();
-            pack_tile(/*dst_index=*/2, out_id);
+            pack_tile(3, out_id);
             tile_regs_release();
 
-            buff_out.push_back(1);
-            buff_in0.pop_front(1);
-            buff_in1.pop_front(1);
+            dfb_out.push_back(1);
+            dfb_in0.pop_front(1);
+            dfb_in1.pop_front(1);
+            dfb_in2.pop_front(1);
+#else
+            cb_wait_front(in0_id, 1);
+            cb_wait_front(in1_id, 1);
+            cb_wait_front(in2_id, 1);
+            cb_reserve_back(out_id, 1);
+
+            tile_regs_acquire();
+            copy_tile(in0_id, 0, 0);
+            copy_tile(in1_id, 0, 1);
+            copy_tile(in2_id, 0, 2);
+
+#ifdef SFPU_OP_CHAIN_0
+            SFPU_OP_CHAIN_0
+#endif
+            tile_regs_commit();
+
+            tile_regs_wait();
+            pack_tile(3, out_id);
+            tile_regs_release();
+
+            cb_push_back(out_id, 1);
+            cb_pop_front(in0_id, 1);
+            cb_pop_front(in1_id, 1);
+            cb_pop_front(in2_id, 1);
+#endif
         }
     }
+
+#else  // !SFPU_TERNARY_OP
+
+    // ===== Unary SFPU path (existing eltwise_sfpu.cpp behaviour) =====
+#ifdef ARCH_QUASAR
+    constexpr uint32_t per_core_block_cnt = get_arg(args::per_core_block_cnt);
+    constexpr uint32_t per_core_block_dim = get_arg(args::per_core_block_dim);
+    DataflowBuffer buff_in(dfb::in);
+    DataflowBuffer buff_out(dfb::out);
+    const uint32_t in_id = buff_in.get_id();
+    const uint32_t out_id = buff_out.get_id();
 #else
     uint32_t per_core_block_cnt = get_compile_time_arg_val(0);
     uint32_t per_core_block_dim = get_compile_time_arg_val(1);
@@ -62,7 +119,6 @@ void kernel_main() {
         buff_out.reserve_back(per_core_block_dim);
         for (uint32_t tile_index = 0; tile_index < per_core_block_dim; ++tile_index) {
             tile_regs_acquire();
-            // Pop tile after tile, copy to DST and pack
             buff_in.wait_front(1);
             copy_tile(in_id, 0, 0);
 #ifdef SFPU_OP_CHAIN_0
@@ -76,5 +132,5 @@ void kernel_main() {
         }
         buff_out.push_back(per_core_block_dim);
     }
-#endif
+#endif  // SFPU_TERNARY_OP
 }
