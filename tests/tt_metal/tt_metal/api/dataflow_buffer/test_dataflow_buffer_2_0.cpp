@@ -394,7 +394,7 @@ TEST_F(MeshDeviceFixture, B1_2_0_DM0NoKernel_TensixDMImplicitSync) {
 
 TEST_F(MeshDeviceFixture, B1b_2_0_DM0IdleSubordinateRuns_TensixDMImplicitSync) {
     // B1b same shape as B1 with an extra iter to expose stale-credit edge.
-    run_dm_dfb_dm_implicit_sync_2_0(this->devices_.at(0), /*num_iterations=*/1, /*implicit_sync=*/true);
+    run_dm_dfb_dm_implicit_sync_2_0(this->devices_.at(0), /*num_iterations=*/2, /*implicit_sync=*/true);
 }
 
 TEST_F(MeshDeviceFixture, B3_2_0_TailCreditRace_RepeatedImplicitSync_DMDM) {
@@ -1600,18 +1600,6 @@ TEST_P(DFBImplicitSyncParamFixture_2_0, MultiCoreDMTest2Core_1Sx4A_2_0) {
 
 // --- A2: concurrent DFBs (TC allocator stress) ---
 TEST_P(DFBImplicitSyncParamFixture_2_0, DMTest3xDFB_1Sx1S_2_0) {
-    run_concurrent_dfbs_program_2_0(
-        this->devices_.at(0),
-        /*num_dfbs=*/3,
-        /*entry_size=*/1024,
-        /*entries_per_dfb=*/16,
-        GetParam());
-}
-
-TEST_P(DFBImplicitSyncParamFixture_2_0, DMTest4xDFB_1Sx1S_2_0) {
-    if (GetParam()) {
-        GTEST_SKIP() << "M2 A2 4xDFB with implicit_sync deferred (matches legacy DM→ALL gap)";
-    }
     run_concurrent_dfbs_program_2_0(
         this->devices_.at(0),
         /*num_dfbs=*/3,
