@@ -439,20 +439,17 @@ Conv2dBlockConfig determine_per_core_conv_block_config(
         if (padded_output_height_ntiles_per_core % act_block_h_override_ntiles == 0) {
             act_block_h_ntiles = act_block_h_override_ntiles;
         } else {
-            uint32_t act_block_h_override_ntiles = act_block_h_override / tt::constants::TILE_HEIGHT;
-            if (padded_output_height_ntiles_per_core % act_block_h_override_ntiles == 0) {
-                act_block_h_ntiles = act_block_h_override_ntiles;
-            } else {
-                act_block_h_ntiles =
-                    find_closest_largest_divisor(padded_output_height_ntiles_per_core, act_block_h_override_ntiles);
-                log_warning(
-                    tt::LogOp,
-                    "act_block_h_override {} is not a valid override for padded_output_height_ntiles_per_core {}, "
-                    "instead {} was selected as closest valid option!",
-                    act_block_h_override_ntiles,
-                    padded_output_height_ntiles_per_core,
-                    act_block_h_ntiles);
-            }
+            // Override doesn't evenly divide per_core height. Keep the auto value
+            // (per_core_out_matrix_height_ntile = 1 block per core) which is always L1-safe
+            // and avoids pathologically small fallbacks like act_block_h=3 for padded=159
+            // (which would cause 53x more inner loop iterations than necessary).
+            log_warning(
+                tt::LogOp,
+                "act_block_h_override {} is not a valid override for padded_output_height_ntiles_per_core {}, "
+                "using auto value {} instead.",
+                act_block_h_override_ntiles,
+                padded_output_height_ntiles_per_core,
+                act_block_h_ntiles);
         }
     }
 
