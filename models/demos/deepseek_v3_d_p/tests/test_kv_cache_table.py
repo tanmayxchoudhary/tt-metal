@@ -116,8 +116,6 @@ def test_kv_cache_table(
     # Initialize KVPE cache
     kvpe_cache_head_dim = config.qk_rope_head_dim + config.kv_lora_rank  # 576
 
-    # Initialise kvpe cache with 2 layers, but run only 1 layer.
-    # Other layer should be zeros
     num_kvpe_cache_layers = 1
     tt_kvpe_cache = init_kvpe_cache(
         kvpe_cache_head_dim=kvpe_cache_head_dim,
