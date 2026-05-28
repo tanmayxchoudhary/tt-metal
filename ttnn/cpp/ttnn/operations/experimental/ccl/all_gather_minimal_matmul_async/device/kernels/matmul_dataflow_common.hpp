@@ -71,7 +71,7 @@ auto make_tensor_accessor_tuple_uniform_page_size_common(
 using namespace tt::tt_fabric::linear::experimental;
 #endif
 
-#ifdef IS_IN0
+#if defined(IS_IN0) || defined(IS_IN1)
 void compute_actual_k_block(
     uint32_t k_block_iter,
     uint32_t total_k_block_count,
@@ -80,13 +80,13 @@ void compute_actual_k_block(
     uint32_t k_tiles_per_block,
     uint32_t num_devices,
     bool is_forward,
-    bool is_first_n_block,
+    bool wait_for_forwarded_data,
     volatile tt_l1_ptr uint32_t* out_ready_semaphore_forward,
     volatile tt_l1_ptr uint32_t* out_ready_semaphore_backward,
     uint32_t& sem_target_forward,
     uint32_t& sem_target_backward,
     bool is_injector_core,
-    uint32_t in0_core_order_size,
+    uint32_t core_order_size,
     uint32_t k_left_tiles,
     uint32_t& k_left_start_tile,
     uint32_t& k_right_start_tile) {
@@ -130,14 +130,16 @@ void compute_actual_k_block(
         k_right_start_tile =
             (actual_device_rank * k_blocks_per_device + device_k_block_iter) * k_tiles_per_block + k_left_tiles;
     }
-#ifdef IS_IN0
-    if (device_iter > 0 && is_first_n_block) {
-        // When we are not reading from local, and we are in the first forward pass through n, wait for data to arrive
+#if defined(IS_IN0) || defined(IS_IN1)
+    if (device_iter > 0 && wait_for_forwarded_data) {
+        // Reading from a remote rank's slice and this is the first iteration along the reuse axis
+        // (for in0 the reuse axis is N → n_block_iter==0; for in1 it is M → m_block_iter==0).
+        // Wait for the remote slice to land in the persistent buffer before the injector reads it.
         if (is_injector_core) {
-            noc_semaphore_wait_min(out_ready_semaphore_forward, sem_target_forward + in0_core_order_size);
-            sem_target_forward += in0_core_order_size;
-            noc_semaphore_wait_min(out_ready_semaphore_backward, sem_target_backward + in0_core_order_size);
-            sem_target_backward += in0_core_order_size;
+            noc_semaphore_wait_min(out_ready_semaphore_forward, sem_target_forward + core_order_size);
+            sem_target_forward += core_order_size;
+            noc_semaphore_wait_min(out_ready_semaphore_backward, sem_target_backward + core_order_size);
+            sem_target_backward += core_order_size;
         }
     }
 #endif
@@ -227,6 +229,92 @@ FORCE_INLINE void forward_half_block_to_fabric_neighbor(
     }
 
     // unicast output ready semaphore
+    fabric_unicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
+        mux_connection_handle,
+        pkt_hdr_sem_inc,
+        tt::tt_fabric::NocUnicastAtomicIncCommandHeader{out_ready_sem_noc_addr_in_pkt, 0});
+
+    noc_async_writes_flushed();
+}
+
+// Sibling of forward_half_block_to_fabric_neighbor for in1 (FSDP weight gather).
+// Splits the same K dimension as in0 so left/right halves stay K-aligned across both operands,
+// but walks (half_k_block_tiles rows × N_block_tiles per-row tiles) instead of (m_block_tiles × half_k).
+// In1 L1 layout is K_block_tiles rows × N_block_tiles cols of tiles; PWB layout is [K_full, N_local].
+template <typename TensorAccessorType, typename ConnectionHandleType>
+FORCE_INLINE void forward_in1_half_block_to_fabric_neighbor(
+    uint32_t k_tile_start,  // K-tile index in PWB at the start of the full K-block
+    uint32_t n_tile_start,  // N-tile index in PWB at the start of the current N-block
+    uint32_t k_left_tiles,
+    uint32_t k_right_tiles,
+    uint32_t current_N_block_tiles,  // actual N tiles to write per row (handles partial last-N)
+    uint32_t N_block_tiles,          // padded N tiles per K-row in the L1 block (for L1 stride)
+    uint32_t num_tiles_to_write_per_packet,
+    uint32_t in1_start_address,
+    uint32_t pwb_N_Wt,  // PWB N width in tiles
+    const TensorAccessorType& pwb_addrgen,
+    ConnectionHandleType mux_connection_handle,
+    PacketHeaders pkt_hdrs,
+    uint16_t page_size,
+    uint64_t out_ready_sem_noc_addr_in_pkt,
+    bool write_left_half,
+    bool do_write) {
+    auto* pkt_scatter_hdr = pkt_hdrs.scatter_hdr;
+    auto* pkt_unicast_hdr = pkt_hdrs.unicast_hdr;
+    auto* pkt_hdr_sem_inc = pkt_hdrs.sem_inc_hdr;
+
+    uint32_t half_k_block_tiles = write_left_half ? k_left_tiles : k_right_tiles;
+    uint32_t k_half_offset = write_left_half ? 0 : k_left_tiles;  // K-tile offset within the K-block
+    uint32_t tiles_to_read = half_k_block_tiles * current_N_block_tiles;
+    uint32_t tiles_read = 0;
+    uint32_t k_row_in_half = 0;
+    uint32_t col_in_row = 0;
+    // L1: each K-row stride is N_block_tiles * page_size. Skip the left K-half rows if writing the right half.
+    size_t l1_read_addr = in1_start_address + (write_left_half ? 0 : (k_left_tiles * N_block_tiles * page_size));
+
+    while (tiles_read < tiles_to_read) {
+        uint32_t tiles_remaining_to_read = tiles_to_read - tiles_read;
+        uint32_t tiles_to_put_in_current_packet = std::min(tiles_remaining_to_read, num_tiles_to_write_per_packet);
+        bool reached_row_end = false;
+
+        uint16_t chunk_sizes[3] = {page_size, page_size, page_size};
+        uint64_t noc_addrs[4] = {0, 0, 0, 0};
+        for (uint32_t i = 0; i < tiles_to_put_in_current_packet; i++) {
+            uint32_t tile_id = (k_tile_start + k_half_offset + k_row_in_half) * pwb_N_Wt + (n_tile_start + col_in_row);
+            col_in_row++;
+            if (col_in_row >= current_N_block_tiles) {
+                col_in_row = 0;
+                k_row_in_half++;
+                reached_row_end = true;
+                tiles_to_put_in_current_packet = i + 1;  // break early at row boundary
+            }
+            noc_addrs[i] = tt::tt_fabric::linear::addrgen_detail::get_noc_address(pwb_addrgen, tile_id, 0);
+        }
+        if (do_write) {
+            if (tiles_to_put_in_current_packet > 1) {
+                fabric_unicast_noc_scatter_write_with_state<
+                    UnicastScatterWriteUpdateMask::DstAddrs | UnicastScatterWriteUpdateMask::ChunkSizes |
+                    UnicastScatterWriteUpdateMask::PayloadSize>(
+                    mux_connection_handle,
+                    pkt_scatter_hdr,
+                    l1_read_addr,
+                    NocUnicastScatterCommandHeader(noc_addrs, chunk_sizes, tiles_to_put_in_current_packet),
+                    page_size * tiles_to_put_in_current_packet);
+            } else {
+                fabric_unicast_noc_unicast_write_with_state<UnicastWriteUpdateMask::DstAddr>(
+                    mux_connection_handle, pkt_unicast_hdr, l1_read_addr, NocUnicastCommandHeader{noc_addrs[0]});
+            }
+
+            noc_async_writes_flushed();
+            tiles_read += tiles_to_put_in_current_packet;
+            l1_read_addr += (tiles_to_put_in_current_packet * page_size);
+            if (reached_row_end) {
+                // Skip the padded N tiles in L1 (between current_N_block_tiles and N_block_tiles).
+                l1_read_addr += ((N_block_tiles - current_N_block_tiles) * page_size);
+            }
+        }
+    }
+
     fabric_unicast_noc_unicast_atomic_inc_with_state<UnicastAtomicIncUpdateMask::DstAddr>(
         mux_connection_handle,
         pkt_hdr_sem_inc,
