@@ -258,6 +258,87 @@ std::set<tt::tt_metal::AsicID> compute_required_asics_for_fabric_node(
     return required_asics;
 }
 
+namespace {
+
+std::set<tt::tt_metal::AsicID> asics_in_physical_mesh(
+    const PhysicalMultiMeshGraph& physical_graph, MeshId physical_mesh_id) {
+    std::set<tt::tt_metal::AsicID> asics;
+    const auto mesh_it = physical_graph.mesh_adjacency_graphs_.find(physical_mesh_id);
+    if (mesh_it == physical_graph.mesh_adjacency_graphs_.end()) {
+        return asics;
+    }
+    for (const auto& asic_id : mesh_it->second.get_nodes()) {
+        asics.insert(asic_id);
+    }
+    return asics;
+}
+
+bool physical_meshes_have_qsfp_link(
+    const std::set<tt::tt_metal::AsicID>& asics_a,
+    const std::set<tt::tt_metal::AsicID>& asics_b,
+    const PortTypeLinkMap& port_type_links) {
+    for (const auto& asic_a : asics_a) {
+        for (const auto& asic_b : asics_b) {
+            if (port_type_link_has_type(port_type_links, asic_a, asic_b, tt::tt_metal::PortType::QSFP_DD)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::set<MeshId> unbound_physical_meshes(
+    const PhysicalMultiMeshGraph& physical_graph, const std::set<MeshId>& bound_physical_mesh_ids) {
+    std::set<MeshId> unbound;
+    for (const auto& [physical_mesh_id, adj] : physical_graph.mesh_adjacency_graphs_) {
+        if (!bound_physical_mesh_ids.contains(physical_mesh_id) && !adj.get_nodes().empty()) {
+            unbound.insert(physical_mesh_id);
+        }
+    }
+    return unbound;
+}
+
+std::set<MeshId> intersect_mesh_id_sets(const std::set<MeshId>& a, const std::set<MeshId>& b) {
+    std::set<MeshId> intersection;
+    std::set_intersection(a.begin(), a.end(), b.begin(), b.end(), std::inserter(intersection, intersection.begin()));
+    return intersection;
+}
+
+}  // namespace
+
+std::set<MeshId> compute_preferred_physical_meshes_for_logical_mesh(
+    MeshId logical_mesh,
+    const AdjacencyGraph<MeshId>& mesh_logical_level_graph,
+    const PhysicalMultiMeshGraph& physical_graph,
+    const PortTypeLinkMap& port_type_links,
+    const std::set<MeshId>& bound_physical_mesh_ids) {
+    const auto unbound = unbound_physical_meshes(physical_graph, bound_physical_mesh_ids);
+    const auto logical_neighbors = mesh_logical_level_graph.get_neighbors(logical_mesh);
+    if (logical_neighbors.empty()) {
+        return unbound;
+    }
+
+    std::set<MeshId> preferred;
+    for (const MeshId physical_mesh : unbound) {
+        const auto asics_in_mesh = asics_in_physical_mesh(physical_graph, physical_mesh);
+        bool has_qsfp_to_other_partition = false;
+        for (const MeshId other_physical_mesh : unbound) {
+            if (other_physical_mesh == physical_mesh) {
+                continue;
+            }
+            const auto other_asics = asics_in_physical_mesh(physical_graph, other_physical_mesh);
+            if (physical_meshes_have_qsfp_link(asics_in_mesh, other_asics, port_type_links)) {
+                has_qsfp_to_other_partition = true;
+                break;
+            }
+        }
+        if (has_qsfp_to_other_partition) {
+            preferred.insert(physical_mesh);
+        }
+    }
+    return preferred;
+}
+
 bool fabric_node_has_cross_host_required_port_type(
     FabricNodeId fabric_node,
     const LogicalAdjacencyMap& logical_adjacency,
@@ -1149,6 +1230,118 @@ void add_inter_mesh_minimal_host_cover_from_hostname_map(
     }
 }
 
+// Port-type-aware inter-mesh preferred constraints: host locality + cross-partition QSFP preference.
+// Replaces add_inter_mesh_minimal_host_cover_from_hostname_map when port_type_links is populated.
+void add_inter_mesh_port_type_preferred_constraints(
+    const TopologyMappingConfig& config,
+    const PhysicalMultiMeshGraph& physical_graph,
+    const AdjacencyGraph<MeshId>& mesh_logical_level_graph,
+    ::tt::tt_fabric::MappingConstraints<MeshId, MeshId>& inter_mesh_constraints,
+    const std::map<MeshId, MeshId>& rank_bound_logical_to_physical) {
+    if (!config.port_type_links.has_value()) {
+        return;
+    }
+    const PortTypeLinkMap& port_type_links = *config.port_type_links;
+
+    std::set<MeshId> bound_physical_mesh_ids;
+    for (const auto& [_, physical_mesh_id] : rank_bound_logical_to_physical) {
+        bound_physical_mesh_ids.insert(physical_mesh_id);
+    }
+
+    std::set<MeshId> logical_target_set;
+    for (const MeshId& m : mesh_logical_level_graph.get_nodes()) {
+        if (!rank_bound_logical_to_physical.contains(m)) {
+            logical_target_set.insert(m);
+        }
+    }
+    if (logical_target_set.size() <= 1) {
+        return;
+    }
+
+    const auto all_unbound_physical = unbound_physical_meshes(physical_graph, bound_physical_mesh_ids);
+
+    std::optional<std::set<MeshId>> host_preferred_globals;
+    if (!config.hostname_to_asics.empty()) {
+        std::vector<std::set<MeshId>> global_mesh_groups;
+        std::map<std::string, std::size_t> host_group_index;
+        for (const auto& [phys_mesh_id, adj] : physical_graph.mesh_adjacency_graphs_) {
+            if (bound_physical_mesh_ids.contains(phys_mesh_id)) {
+                continue;
+            }
+            if (adj.get_nodes().empty()) {
+                continue;
+            }
+            std::set<std::string> hosts_for_mesh;
+            for (const auto& asic_id : adj.get_nodes()) {
+                auto hostname = hostname_for_asic_from_hostname_map(asic_id, config.hostname_to_asics);
+                if (hostname.has_value()) {
+                    hosts_for_mesh.insert(*hostname);
+                }
+            }
+            if (hosts_for_mesh.size() == 1) {
+                auto [it, inserted] = host_group_index.try_emplace(*hosts_for_mesh.begin(), global_mesh_groups.size());
+                if (inserted) {
+                    global_mesh_groups.emplace_back();
+                }
+                global_mesh_groups[it->second].insert(phys_mesh_id);
+            } else {
+                global_mesh_groups.push_back({phys_mesh_id});
+            }
+        }
+
+        if (!global_mesh_groups.empty()) {
+            const auto [single_group_fits, preferred_globals] =
+                ::tt::tt_fabric::PhysicalGroupingDescriptor::find_minimum_coverage_group(
+                    logical_target_set, global_mesh_groups);
+            if (single_group_fits) {
+                std::vector<std::set<MeshId>> target_groups;
+                target_groups.push_back(logical_target_set);
+                if (inter_mesh_constraints.set_same_rank_groups_constraint(target_groups, global_mesh_groups)) {
+                    return;
+                }
+                log_warning(
+                    tt::LogFabric,
+                    "Inter-mesh port-type host alignment: failed to set same-rank groups constraint; falling back to "
+                    "preferred globals");
+            }
+            if (!preferred_globals.empty()) {
+                if (!single_group_fits) {
+                    log_debug(
+                        tt::LogFabric,
+                        "Inter-mesh port-type host alignment: target count {} exceeds largest single partition; "
+                        "preferring minimal host cover ({} preferred globals)",
+                        logical_target_set.size(),
+                        preferred_globals.size());
+                }
+                host_preferred_globals = preferred_globals;
+            }
+        }
+    }
+
+    for (const MeshId& target : logical_target_set) {
+        const auto port_preferred = compute_preferred_physical_meshes_for_logical_mesh(
+            target, mesh_logical_level_graph, physical_graph, port_type_links, bound_physical_mesh_ids);
+
+        std::set<MeshId> final_preferred;
+        if (host_preferred_globals.has_value() && !host_preferred_globals->empty()) {
+            if (!port_preferred.empty()) {
+                final_preferred = intersect_mesh_id_sets(*host_preferred_globals, port_preferred);
+            } else {
+                final_preferred = *host_preferred_globals;
+            }
+        } else if (!port_preferred.empty()) {
+            final_preferred = port_preferred;
+        }
+
+        if (final_preferred.empty()) {
+            continue;
+        }
+        if (final_preferred.size() < all_unbound_physical.size()) {
+            inter_mesh_constraints.add_preferred_constraint(target, final_preferred);
+        }
+    }
+}
+
 // Physical mesh partition (among unbound) that minimally covers required_asics, else nullopt.
 std::optional<MeshId> smallest_physical_mesh_covering_required_asics(
     const PhysicalMultiMeshGraph& physical_graph,
@@ -1381,8 +1574,13 @@ std::map<AsicPosition, std::set<tt::tt_metal::AsicID>> build_asic_positions_map(
 
     // Skip if rank bindings are disabled
     if (config.disable_rank_bindings) {
-        add_inter_mesh_minimal_host_cover_from_hostname_map(
-            config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, {});
+        if (config.port_type_links.has_value()) {
+            add_inter_mesh_port_type_preferred_constraints(
+                config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, {});
+        } else {
+            add_inter_mesh_minimal_host_cover_from_hostname_map(
+                config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, {});
+        }
         add_logical_mesh_zero_anchor_inter_mesh_preference(
             config, physical_graph, mesh_logical_level_graph, {}, inter_mesh_constraints);
         return inter_mesh_constraints;
@@ -1440,8 +1638,13 @@ std::map<AsicPosition, std::set<tt::tt_metal::AsicID>> build_asic_positions_map(
         inter_mesh_constraints.add_required_constraint(logical_mesh_id, physical_it->second);
     }
 
-    add_inter_mesh_minimal_host_cover_from_hostname_map(
-        config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, rank_bound_logical_to_physical);
+    if (config.port_type_links.has_value()) {
+        add_inter_mesh_port_type_preferred_constraints(
+            config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, rank_bound_logical_to_physical);
+    } else {
+        add_inter_mesh_minimal_host_cover_from_hostname_map(
+            config, physical_graph, mesh_logical_level_graph, inter_mesh_constraints, rank_bound_logical_to_physical);
+    }
     add_logical_mesh_zero_anchor_inter_mesh_preference(
         config, physical_graph, mesh_logical_level_graph, rank_bound_logical_to_physical, inter_mesh_constraints);
     return inter_mesh_constraints;
