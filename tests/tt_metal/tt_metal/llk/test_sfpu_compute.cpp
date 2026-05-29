@@ -297,7 +297,7 @@ bool run_sfpu_all_same_buffer(
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
-        .runtime_arguments_schema = {.named_runtime_args = {"src_addr", "bank_id", "num_tiles"}},
+        .runtime_arg_schema = {.runtime_arg_names = {"src_addr", "bank_id", "num_tiles"}},
         .config_spec =
             experimental::metal2_host_api::DataMovementConfiguration{
                 .gen1_data_movement_config =
@@ -320,7 +320,7 @@ bool run_sfpu_all_same_buffer(
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
-        .runtime_arguments_schema = {.named_runtime_args = {"dst_addr", "bank_id", "num_tiles"}},
+        .runtime_arg_schema = {.runtime_arg_names = {"dst_addr", "bank_id", "num_tiles"}},
         .config_spec =
             experimental::metal2_host_api::DataMovementConfiguration{
                 .gen1_data_movement_config =
@@ -356,7 +356,7 @@ bool run_sfpu_all_same_buffer(
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
-        .compile_time_arg_bindings =
+        .compile_time_args =
             {{"per_core_block_cnt", static_cast<uint32_t>(test_config.num_tiles)}, {"per_core_block_dim", 1u}},
         .config_spec =
             experimental::metal2_host_api::ComputeConfiguration{
@@ -385,31 +385,31 @@ bool run_sfpu_all_same_buffer(
     workload.add_program(device_range, std::move(program));
     auto& program_run = workload.get_programs().at(device_range);
 
-    experimental::metal2_host_api::ProgramRunParams params;
-    params.kernel_run_params = {
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+    experimental::metal2_host_api::ProgramRunArgs params;
+    params.kernel_run_args = {
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = READER,
-            .named_runtime_args =
+            .runtime_arg_values =
                 {{.node = node,
                   .args =
                       {{"src_addr", input_dram_buffer->address()},
                        {"bank_id", 0u},
                        {"num_tiles", static_cast<uint32_t>(test_config.num_tiles)}}}},
         },
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = WRITER,
-            .named_runtime_args =
+            .runtime_arg_values =
                 {{.node = node,
                   .args =
                       {{"dst_addr", output_dram_buffer->address()},
                        {"bank_id", 0u},
                        {"num_tiles", static_cast<uint32_t>(test_config.num_tiles)}}}},
         },
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = COMPUTE,
         },
     };
-    experimental::metal2_host_api::SetProgramRunParameters(program_run, params);
+    experimental::metal2_host_api::SetProgramRunArgs(program_run, params);
 
     tt_metal::detail::WriteToBuffer(input_dram_buffer, packed_input);
     distributed::EnqueueMeshWorkload(cq, workload, false);
@@ -515,8 +515,8 @@ bool run_sfpu_binary_two_input_buffer(
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
-        .runtime_arguments_schema =
-            {.named_runtime_args = {"src0_addr", "src0_bank_id", "src1_addr", "src1_bank_id", "num_tiles"}},
+        .runtime_arg_schema =
+            {.runtime_arg_names = {"src0_addr", "src0_bank_id", "src1_addr", "src1_bank_id", "num_tiles"}},
         .config_spec =
             experimental::metal2_host_api::DataMovementConfiguration{
                 .gen1_data_movement_config =
@@ -539,7 +539,7 @@ bool run_sfpu_binary_two_input_buffer(
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
-        .runtime_arguments_schema = {.named_runtime_args = {"dst_addr", "bank_id", "num_tiles"}},
+        .runtime_arg_schema = {.runtime_arg_names = {"dst_addr", "bank_id", "num_tiles"}},
         .config_spec =
             experimental::metal2_host_api::DataMovementConfiguration{
                 .gen1_data_movement_config =
@@ -581,7 +581,7 @@ bool run_sfpu_binary_two_input_buffer(
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
-        .compile_time_arg_bindings =
+        .compile_time_args =
             {{"per_core_block_cnt", 1u}, {"per_core_block_size", static_cast<uint32_t>(test_config.num_tiles)}},
         .config_spec =
             experimental::metal2_host_api::ComputeConfiguration{
@@ -612,11 +612,11 @@ bool run_sfpu_binary_two_input_buffer(
     auto& program_run = workload.get_programs().at(device_range);
 
     const uint32_t num_tiles_u = static_cast<uint32_t>(test_config.num_tiles);
-    experimental::metal2_host_api::ProgramRunParams params;
-    params.kernel_run_params = {
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+    experimental::metal2_host_api::ProgramRunArgs params;
+    params.kernel_run_args = {
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = READER,
-            .named_runtime_args =
+            .runtime_arg_values =
                 {{.node = node,
                   .args =
                       {{"src0_addr", input0_dram_buffer->address()},
@@ -625,17 +625,17 @@ bool run_sfpu_binary_two_input_buffer(
                        {"src1_bank_id", 0u},
                        {"num_tiles", num_tiles_u}}}},
         },
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = WRITER,
-            .named_runtime_args =
+            .runtime_arg_values =
                 {{.node = node,
                   .args = {{"dst_addr", output_dram_buffer->address()}, {"bank_id", 0u}, {"num_tiles", num_tiles_u}}}},
         },
-        experimental::metal2_host_api::ProgramRunParams::KernelRunParams{
+        experimental::metal2_host_api::ProgramRunArgs::KernelRunArgs{
             .kernel_spec_name = COMPUTE,
         },
     };
-    experimental::metal2_host_api::SetProgramRunParameters(program_run, params);
+    experimental::metal2_host_api::SetProgramRunArgs(program_run, params);
 
     tt_metal::detail::WriteToBuffer(input0_dram_buffer, packed_lhs);
     tt_metal::detail::WriteToBuffer(input1_dram_buffer, packed_rhs);
