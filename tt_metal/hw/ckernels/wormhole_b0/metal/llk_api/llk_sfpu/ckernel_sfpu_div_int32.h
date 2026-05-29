@@ -17,14 +17,14 @@ inline void calculate_div_int32(const uint dst_index_in0, const uint dst_index_i
 
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; d++) {
-        sfpi::vSMag in0 = sfpi::dst_reg[dst_index_in0 * dst_tile_size_sfpi];
-        sfpi::vSMag in1 = sfpi::dst_reg[dst_index_in1 * dst_tile_size_sfpi];
+        sfpi::vInt in0 = sfpi::dst_reg[dst_index_in0 * dst_tile_size_sfpi];
+        sfpi::vInt in1 = sfpi::dst_reg[dst_index_in1 * dst_tile_size_sfpi];
         sfpi::vFloat result = 0.0f;
 
-        v_if((sfpi::as<vInt>(in0) << 1) != 0 && sfpi::as<vInt>(in0) == sfpi::as<vInt>(in1)) { result = sfpi::vConst1; }
+        v_if(in0 != 0 && in0 == in1) { result = sfpi::vConst1; }
         v_else {
-            sfpi::vFloat float_in0 = sfpi::convert<sfpi::vFloat>(in0, sfpi::RoundMode::NearestEven);
-            sfpi::vFloat float_in1 = sfpi::convert<sfpi::vFloat>(in1, sfpi::RoundMode::NearestEven);
+            sfpi::vFloat float_in0 = sfpi::int32_to_float(in0, sfpi::RoundMode::NearestEven);
+            sfpi::vFloat float_in1 = sfpi::int32_to_float(in1, sfpi::RoundMode::NearestEven);
             result = float_in0 * _sfpu_reciprocal_<2>(float_in1);
         }
         v_endif;
