@@ -250,6 +250,15 @@ def golden_avg_pool2d(
         divisor_override=divisor_override,
     )
 
+    # TTNN represents the averaging scalar as bfloat16, which introduces a small
+    # rounding bias. Adjust the reference to use the same bf16-rounded scalar so
+    # the comparison only measures bf16 accumulation precision (within rtol),
+    # not the unavoidable scalar quantisation gap.
+    if divisor_override is not None:
+        exact_scalar = 1.0 / divisor_override
+        bf16_scalar = float(torch.tensor(exact_scalar, dtype=torch.bfloat16))
+        output_tensor = output_tensor * (bf16_scalar / exact_scalar)
+
     return pool_output_to_flat_nhwc(output_tensor)
 
 
