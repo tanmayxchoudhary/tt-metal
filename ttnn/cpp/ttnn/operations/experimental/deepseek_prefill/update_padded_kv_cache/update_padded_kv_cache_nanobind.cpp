@@ -28,12 +28,20 @@ void bind_update_padded_kv_cache(nb::module_& mod) {
 
             In place: returns a handle to `cache`.
 
+            Cache slot is linearized users-outer, layers-inner — internally the op composes
+            ``batch_idx = slot_idx * num_layers + layer_idx``. Single-user prefill callers
+            pass ``slot_idx=0`` and the desired ``layer_idx``.
+
             Args:
                 cache (ttnn.Tensor): 4D KV cache tensor on device, TILE layout. Sharded across
-                    `cluster_axis` with `sp_factor` slots per chip.
+                    `cluster_axis` with `sp_factor` slots per chip. Outermost dim equals
+                    ``num_slots * num_layers``.
                 input (ttnn.Tensor): 4D input slab on device, TILE layout, same dtype and head
                     dim as cache. Per-chip seq length = chunk_local.
-                batch_idx (int): Cache batch slot (user-major layer index).
+                slot_idx (int): User slot in the batched prefill cache.
+                layer_idx (int): Transformer layer index for this call.
+                num_layers (int): Total layers folded into the cache batch dim. Structural —
+                    fixed for the lifetime of the workload.
                 kv_actual_global (int): Prior valid global KV length in tokens. Tile-aligned.
                 cluster_axis (int): Cluster axis along which the cache is sharded (0 or 1).
 
@@ -43,7 +51,9 @@ void bind_update_padded_kv_cache(nb::module_& mod) {
         &ttnn::operations::experimental::deepseek_prefill::update_padded_kv_cache::update_padded_kv_cache,
         nb::arg("cache").noconvert(),
         nb::arg("input").noconvert(),
-        nb::arg("batch_idx"),
+        nb::arg("slot_idx"),
+        nb::arg("layer_idx"),
+        nb::arg("num_layers"),
         nb::arg("kv_actual_global"),
         nb::arg("cluster_axis"));
 }

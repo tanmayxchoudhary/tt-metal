@@ -389,7 +389,9 @@ def test_update_padded_kv_cache_ttnn(mesh_device, kv_actual_global, new_actual_i
     ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
         tt_cache,
         tt_input,
-        batch_idx=0,
+        slot_idx=0,
+        layer_idx=0,
+        num_layers=1,
         kv_actual_global=kv_actual_global,
         cluster_axis=sp_axis,
     )
@@ -464,7 +466,9 @@ def test_perf_update_padded_kv_cache(mesh_device):
     ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
         tt_cache,
         tt_input,
-        batch_idx=0,
+        slot_idx=0,
+        layer_idx=0,
+        num_layers=1,
         kv_actual_global=2560,
         cluster_axis=_PERF_SP_AXIS,
     )
@@ -485,11 +489,11 @@ def test_perf_fill_cache_for_user_baseline(mesh_device):
 @pytest.mark.parametrize("mesh_device", [(2, 4), (2, 2)], ids=["2x4", "2x2"], indirect=True)
 @pytest.mark.timeout(0)
 def test_program_cache_reuse_across_kv_actual_global(mesh_device):
-    """Successive calls with different kv_actual_global must share one cached program.
+    """Successive calls with different kv_actual_global / slot_idx / layer_idx must share one cached program.
 
-    kv_actual_global, batch_idx are runtime args read by the writer kernel, so they're
-    intentionally omitted from compute_program_hash. cluster_axis IS in the hash because
-    it changes the structural meaning of sp_factor / my_sp_coord.
+    kv_actual_global, slot_idx and layer_idx are runtime args read by the writer kernel, so they're
+    intentionally omitted from compute_program_hash. num_layers and cluster_axis stay IN the hash
+    because they are structural (cache slot linearization, mesh sp axis).
     """
     mesh_device.enable_program_cache()
     tt_cache, tt_input = _build_perf_inputs(mesh_device)
@@ -498,7 +502,13 @@ def test_program_cache_reuse_across_kv_actual_global(mesh_device):
 
     # First call: cache miss → +1 entry.
     ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-        tt_cache, tt_input, batch_idx=0, kv_actual_global=0, cluster_axis=_PERF_SP_AXIS
+        tt_cache,
+        tt_input,
+        slot_idx=0,
+        layer_idx=0,
+        num_layers=1,
+        kv_actual_global=0,
+        cluster_axis=_PERF_SP_AXIS,
     )
     ttnn.synchronize_device(mesh_device)
     after_first = mesh_device.num_program_cache_entries()
@@ -506,10 +516,16 @@ def test_program_cache_reuse_across_kv_actual_global(mesh_device):
         after_first == baseline_entries + 1
     ), f"first call should add exactly one cache entry; got {after_first - baseline_entries}"
 
-    # Subsequent calls with different kv_actual_global / batch_idx must hit the same entry.
+    # Subsequent calls with different kv_actual_global must hit the same entry.
     for kv_actual_global in (2560, 5120, 7680):
         ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
-            tt_cache, tt_input, batch_idx=0, kv_actual_global=kv_actual_global, cluster_axis=_PERF_SP_AXIS
+            tt_cache,
+            tt_input,
+            slot_idx=0,
+            layer_idx=0,
+            num_layers=1,
+            kv_actual_global=kv_actual_global,
+            cluster_axis=_PERF_SP_AXIS,
         )
     ttnn.synchronize_device(mesh_device)
 

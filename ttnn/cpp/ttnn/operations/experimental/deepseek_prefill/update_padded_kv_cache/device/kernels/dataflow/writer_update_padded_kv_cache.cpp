@@ -10,10 +10,10 @@
 // CB -> cache writer for the per-chip-offset kv-cache update op.
 //
 // Derives `start_id` on-device from per-call common rt-args so that
-// `kv_actual_global`, `batch_idx` and `cluster_axis` can be omitted from the
-// program hash — successive chunks with different values reuse the same cached
-// program; only rt-args are refreshed via apply_descriptor_runtime_args on the
-// cache-hit slow path.
+// `kv_actual_global`, `slot_idx`, `layer_idx` can be omitted from the program
+// hash — successive chunks with different values reuse the same cached program;
+// only rt-args are refreshed via apply_descriptor_runtime_args on the cache-hit
+// slow path. `num_layers` and `cluster_axis` stay in the hash (structural).
 void kernel_main() {
     // Per-core runtime args.
     const uint32_t dst_addr = get_arg_val<uint32_t>(0);
@@ -25,10 +25,15 @@ void kernel_main() {
     const uint32_t my_sp_coord = get_common_arg_val<uint32_t>(1);
     const uint32_t sp_factor = get_common_arg_val<uint32_t>(2);
     const uint32_t chunk_local_t = get_common_arg_val<uint32_t>(3);
-    const uint32_t batch_idx = get_common_arg_val<uint32_t>(4);
-    const uint32_t Wt = get_common_arg_val<uint32_t>(5);
-    const uint32_t cache_HtWt = get_common_arg_val<uint32_t>(6);
-    const uint32_t cache_CHtWt = get_common_arg_val<uint32_t>(7);
+    const uint32_t slot_idx = get_common_arg_val<uint32_t>(4);
+    const uint32_t layer_idx = get_common_arg_val<uint32_t>(5);
+    const uint32_t num_layers = get_common_arg_val<uint32_t>(6);
+    const uint32_t Wt = get_common_arg_val<uint32_t>(7);
+    const uint32_t cache_HtWt = get_common_arg_val<uint32_t>(8);
+    const uint32_t cache_CHtWt = get_common_arg_val<uint32_t>(9);
+
+    // Cache linearization: users outer, layers inner.
+    const uint32_t batch_idx = slot_idx * num_layers + layer_idx;
 
     // Mirror of update_idxt_for_chip() in the host op.
     const uint32_t chunk_global_t = sp_factor * chunk_local_t;
