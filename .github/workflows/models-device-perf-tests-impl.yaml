@@ -56,8 +56,7 @@ jobs:
           python3 .github/scripts/utils/prepare_test_matrix.py \
             ${{ env.TESTS_YAML_PATH }} \
             "${{ inputs.enabled-skus }}" \
-            ./.github/sku_config.yaml \
-            ./.github/blackhole_demo_systems.yaml
+            ./.github/sku_config.yaml
       - name: Apply model filters
         id: apply-filters
         run: |
@@ -98,8 +97,7 @@ jobs:
         - ${{ github.workspace }}/docker-job:/work # Subdir to workaround https://github.com/actions/runner/issues/691
         - /dev/hugepages-1G:/dev/hugepages-1G
         - /mnt/MLPerf:/mnt/MLPerf${{ inputs.mlperf-read-only && ':ro' || ':rw' }}
-        - ${{ matrix.test-group.sku == 'bh_p300' && format('/localdev/blackhole_demos/huggingface_data:/localdev/blackhole_demos/huggingface_data{0}', inputs.mlperf-read-only && ':ro' || ':rw') || '/no_lfc_cache' }}
-      options: "--device /dev/tenstorrent --privileged -v /sys:/sys -e TT_GH_CI_INFRA"
+      options: "--device /dev/tenstorrent --privileged -v /sys:/sys"
     defaults:
       run:
         shell: bash
@@ -124,13 +122,6 @@ jobs:
           set -e
           mkdir -p /localdev/blackhole_demos/huggingface_data/meta-llama
           wget -r -nH -x --cut-dirs=5 -np --progress=dot:giga -R "index.html*" -P /localdev/blackhole_demos/huggingface_data/meta-llama http://yyz2-lfcache564.yyz2.tenstorrent.com/mldata/model_checkpoints/pytorch/huggingface/meta-llama/Llama-3.1-8B-Instruct/
-      - name: Download Flux.1-dev model weights from LFC
-        if: ${{ matrix.test-group.sku == 'bh_p300' && contains(matrix.test-group.name, 'Flux.1-dev') }}
-        timeout-minutes: 15
-        run: |
-          set -e
-          mkdir -p /localdev/blackhole_demos/huggingface_data/black-forest-labs
-          wget -r -nH -x --cut-dirs=5 -np --progress=dot:giga -R "index.html*" -P /localdev/blackhole_demos/huggingface_data/black-forest-labs http://yyz2-lfcache564.yyz2.tenstorrent.com/mldata/model_checkpoints/pytorch/huggingface/black-forest-labs/models--black-forest-labs--FLUX.1-dev/
       - name: ${{ matrix.test-group.name }}
         timeout-minutes: ${{ matrix.test-group.timeout }}
         run: |
