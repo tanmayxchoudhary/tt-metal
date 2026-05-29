@@ -422,15 +422,17 @@ void kernel_main() {
                             uint32_t distance =
                                 manhattan_distance<topology, mesh_rows, mesh_cols>(linearized_mesh_coord, dst_chip);
 
-                            // Push route info to writer
+                            // Push route info to writer.
+                            // route_info layout: [0]=route, [1]=distance, [2]=output_page_idx, [3]=dst_chip.
+                            // route + distance are consumed by the 1D writer; under FABRIC_2D the writer
+                            // recomputes the EDM direction from route_info[3] and ignores slots [0..1].
+                            // All four slots are written unconditionally
                             cb_reserve_back(cb_route_info_id, 1);
                             volatile tt_l1_ptr uint32_t* route_info =
                                 reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_route_info_id));
                             route_info[0] = route;
                             route_info[1] = distance;
                             route_info[2] = output_page_idx;
-                            // FABRIC_2D: writer looks up dest_chip_ids[dst_chip]/dest_mesh_ids[dst_chip].
-                            // Under 1D this slot is ignored.
                             route_info[3] = dst_chip;
                             cb_push_back(cb_route_info_id, 1);
 

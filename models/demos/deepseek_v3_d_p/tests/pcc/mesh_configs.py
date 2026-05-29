@@ -5,8 +5,26 @@
 """
 Shared mesh configuration parameters for dispatch/combine PCC tests.
 
-Both test_prefill_dispatch.py and test_prefill_combine.py import
-ALL_MESH_CONFIGS to avoid duplicating the same pytest.param entries.
+Both test_prefill_dispatch.py, test_prefill_combine.py, and test_ttnn_dispatch_combine.py
+import ALL_MESH_CONFIGS to avoid duplicating the same pytest.param entries.
+
+Topology vs FabricConfig
+------------------------
+`Topology` is the CCL algorithm's data-flow shape (Linear / Ring / Mesh / Torus) — a
+pytest parametrize axis. `FabricConfig` is the device-level fabric wiring (FABRIC_1D /
+FABRIC_1D_RING / FABRIC_2D) — set via the `mesh_device` fixture's device_params. The two
+are orthogonal: e.g. `Topology::Linear + FABRIC_2D` is valid and intended — it asks for
+linear data-flow over a 2D-routed fabric.
+
+Test-id naming convention
+-------------------------
+- FABRIC_1D entries use shape-only ids: `linear-N-Llink`, `ring-N-Llink`, `mesh-RxC`.
+- FABRIC_2D entries are prefixed with `fabric2d-`: `fabric2d-mesh-RxC[-Llink]`.
+
+CI -k filters depend on this convention. For example, `-k 'mesh-8x4'` matches BOTH 1D and
+2D variants because `mesh-8x4` is a substring of `fabric2d-mesh-8x4`. To run only 1D
+under an existing `-k 'mesh-*'` filter, append `and not fabric2d-`. To run only 2D, use
+a positive `and fabric2d-` filter.
 """
 
 import pytest
@@ -16,7 +34,12 @@ from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_route
 
 
 def _mesh_param(shape, fabric, payload, nlinks, topo, topo_marker, test_id, reliability_mode=None):
-    """Build a single pytest.param for the mesh_device parametrize axis."""
+    """Build a single pytest.param for the mesh_device parametrize axis.
+
+    `topo_marker` is the CI hardware-class string consumed by the `requires_mesh_topology`
+    pytest mark, NOT the test's mesh shape. For example, a (2,2) test uses `topo_marker=
+    "mesh-4x2"` because (2,2) and (4,2) both run on the LoudBox "mesh-4x2"-class machine.
+    """
     device_params = {
         "fabric_config": fabric,
         "fabric_router_config": create_fabric_router_config(max_payload_size=payload),
