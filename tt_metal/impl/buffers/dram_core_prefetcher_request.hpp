@@ -7,15 +7,27 @@
 // out of its H2D socket page via the same structs). Keep both structs packed so the
 // L1 byte layout matches on both sides.
 //
-// One request page is a DramCorePrefetcherRequestHeader followed by
-// kMaxTensorsPerRequest DramCorePrefetcherTensorGeom entries (only the first
-// header.num_tensors are valid). A header with num_tensors == 0 is the stop sentinel.
+// The page starts with a DramCorePrefetcherRequestHeader: a one-byte command id
+// (DramCorePrefetcherBaseCmd) followed by a union of the per-command payloads,
+// modeled on the dispatch CQPrefetchCmd / CQDispatchCmd encoding in
+// tt_metal/impl/dispatch/kernels/cq_commands.hpp. The three commands are:
+//   * STOP     — no payload; the kernel exits its request loop.
+//   * PREFETCH  — followed in the page by header.prefetch.num_tensors
+//                 DramCorePrefetcherTensorGeom entries (only the first num_tensors
+//                 of kMaxTensorsPerRequest are valid).
+//   * WAIT_CQ   — no geoms; the kernel spins until its per-CQ signal slot
+//                 [wait_cq.cq_index] reaches wait_cq.cq_wait_value (wrap-safe).
 
 #pragma once
 
 #include <cstdint>
 
 namespace tt::tt_metal {
+
+// Number of per-DRAM-core CQ signal slots (one uint32 counter per command queue).
+// WaitForCqOnDramCorePrefetcher writes an incrementing value into slot[cq_id] via
+// the dispatcher; a WAIT_CQ request makes the kernel spin until it is reached.
+constexpr uint32_t kNumCqSignalSlots = 2;
 
 // Per-tensor geometry handed to the DRAM-core prefetcher kernel. All values are
 // derived from the tensor shape + dtype + GCB ring topology + DRISC L1 stage budget;
@@ -37,11 +49,40 @@ struct DramCorePrefetcherTensorGeom {
     uint32_t block_count = 0;          // K-blocks for this tensor (per-tensor; was the shared GCB ring size)
 } __attribute__((packed));
 
-// Header at the start of each request page.
-struct DramCorePrefetcherRequestHeader {
-    uint32_t num_tensors = 0;     // number of valid DramCorePrefetcherTensorGeom entries; 0 = stop sentinel
-    uint32_t num_layers = 0;      // outer loop count: the kernel replays the tensor list this many times
-    uint32_t gcb_state_addr = 0;  // DRISC L1 base of the target GCB's sender state block
+// One-byte command id at the front of every request page.
+enum DramCorePrefetcherCmdId : uint8_t {
+    DRAM_PREFETCHER_CMD_STOP = 0,      // exit the request loop (no payload)
+    DRAM_PREFETCHER_CMD_PREFETCH = 1,  // num_tensors geoms follow the header
+    DRAM_PREFETCHER_CMD_WAIT_CQ = 2,   // spin until cq slot[cq_index] >= cq_wait_value
+};
+
+struct DramCorePrefetcherBaseCmd {
+    DramCorePrefetcherCmdId cmd_id;  // 1 byte
 } __attribute__((packed));
+
+// PREFETCH payload. The leading pad keeps num_layers/gcb_state_addr 4-byte aligned
+// past the one-byte base (mirrors the pad fields in cq_commands.hpp commands).
+struct DramCorePrefetcherPrefetchCmd {
+    uint8_t pad1;
+    uint16_t num_tensors;     // number of valid DramCorePrefetcherTensorGeom entries
+    uint32_t num_layers;      // outer loop count: the kernel replays the tensor list this many times
+    uint32_t gcb_state_addr;  // DRISC L1 base of the target GCB's sender state block
+} __attribute__((packed));
+
+// WAIT_CQ payload.
+struct DramCorePrefetcherWaitCqCmd {
+    uint8_t cq_index;  // which per-core CQ signal slot to wait on (0/1)
+    uint16_t pad1;
+    uint32_t cq_wait_value;  // wait until slot >= this value (wrap-safe int32 compare)
+} __attribute__((packed));
+
+// Header at the start of each request page: command id + per-command payload union.
+struct DramCorePrefetcherRequestHeader {
+    DramCorePrefetcherBaseCmd base;
+    union {
+        DramCorePrefetcherPrefetchCmd prefetch;
+        DramCorePrefetcherWaitCqCmd wait_cq;
+    } __attribute__((packed));
+};
 
 }  // namespace tt::tt_metal

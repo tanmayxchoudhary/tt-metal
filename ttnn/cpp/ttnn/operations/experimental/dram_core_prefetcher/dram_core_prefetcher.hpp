@@ -45,6 +45,15 @@ void queue_dram_core_prefetcher_request(
     const tt::tt_metal::experimental::GlobalCircularBuffer& global_cb,
     const std::optional<tt::tt_metal::distributed::MeshCoordinateRangeSet>& device_subset = std::nullopt);
 
+// Fence the prefetcher against work enqueued on command queue `cq_id`: the
+// dispatcher bumps a per-CQ signal slot on every DRAM core and a WAIT_CQ request
+// makes the kernels block until they observe it. Call after the data writes and
+// before the dependent queue_dram_core_prefetcher_request.
+void wait_for_cq_on_dram_core_prefetcher(
+    tt::tt_metal::distributed::MeshDevice* mesh_device,
+    uint8_t cq_id,
+    const std::optional<tt::tt_metal::distributed::MeshCoordinateRangeSet>& device_subset = std::nullopt);
+
 void stop_dram_core_prefetcher(tt::tt_metal::distributed::MeshDevice* mesh_device);
 
 }  // namespace ttnn::operations::experimental

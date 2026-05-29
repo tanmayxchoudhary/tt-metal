@@ -66,6 +66,33 @@ void bind_dram_core_prefetcher(nb::module_& mod) {
         nb::kw_only(),
         nb::arg("device_subset") = std::nullopt);
 
+    ttnn::bind_function<"wait_for_cq_on_dram_core_prefetcher", "ttnn.experimental.">(
+        mod,
+        R"doc(
+            Fence the DRAM-core prefetcher against work enqueued on a command queue.
+            The dispatcher writes an incrementing value into a per-CQ signal slot on every
+            DRAM core (ordered after the prior work on that queue), and a WAIT_CQ request is
+            queued so each kernel blocks until it observes the value. Use this to guarantee
+            data is written to the device before the prefetcher reads it.
+
+            Call synchronously on the host thread that issued the data writes — after those
+            writes, and before the queue_dram_core_prefetcher_request that consumes them.
+
+            Args:
+                mesh_device (ttnn.MeshDevice): the mesh device whose prefetcher to fence.
+                cq_id (int): the command queue to fence against (one signal slot per CQ).
+                device_subset (Optional[MeshCoordinateRangeSet]): subset of the mesh to
+                    signal/wait. Defaults to the full mesh.
+
+            Returns:
+                None
+        )doc",
+        &wait_for_cq_on_dram_core_prefetcher,
+        nb::arg("mesh_device"),
+        nb::arg("cq_id") = 0,
+        nb::kw_only(),
+        nb::arg("device_subset") = std::nullopt);
+
     ttnn::bind_function<"stop_dram_core_prefetcher", "ttnn.experimental.">(
         mod,
         R"doc(
