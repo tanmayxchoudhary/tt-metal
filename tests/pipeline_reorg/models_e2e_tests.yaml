@@ -31,9 +31,6 @@
     wh_llmbox_perf:
       timeout: 11
       tier: 2
-    bh_loudbox:
-      timeout: 11
-      tier: 2
     bh_quietbox_2:
       timeout: 11
       tier: 2
@@ -125,12 +122,6 @@
     wh_llmbox_perf:
       timeout: 30
       tier: 2
-    bh_llmbox:
-      timeout: 30
-      tier: 2
-    bh_loudbox:
-      timeout: 30
-      tier: 2
     bh_quietbox_2:
       timeout: 30
       tier: 2
@@ -178,12 +169,6 @@
     wh_llmbox_perf:
       timeout: 15
       tier: 2
-    bh_llmbox:
-      timeout: 15
-      tier: 2
-    bh_loudbox:
-      timeout: 15
-      tier: 2
     bh_quietbox_2:
       timeout: 15
       tier: 2
@@ -212,7 +197,7 @@
     wh_llmbox_perf:
       timeout: 20
       tier: 2
-    bh_loudbox:
+    bh_quietbox_2:
       timeout: 20
       tier: 2
   owner_id: U03PUAKE719 # Miguel Tairum Cruz
@@ -266,7 +251,7 @@
     wh_llmbox_perf:
       timeout: 20
       tier: 2
-    bh_loudbox:
+    bh_quietbox_2:
       timeout: 20
       tier: 2
   owner_id: U07RY6B5FLJ # Gongyu Wang
@@ -282,7 +267,7 @@
     wh_llmbox_perf:
       timeout: 15
       tier: 3
-    bh_loudbox:
+    bh_quietbox_2:
       timeout: 15
       tier: 3
   owner_id: U07RY6B5FLJ # Gongyu Wang
@@ -458,9 +443,6 @@
     bh_p150:
       timeout: 15
       tier: 2
-    bh_loudbox:
-      timeout: 15
-      tier: 2
     bh_quietbox_2:
       timeout: 15
       tier: 2
@@ -484,9 +466,6 @@
     bh_quietbox_2:
       timeout: 25
       tier: 1
-    bh_loudbox:
-      timeout: 25
-      tier: 2
     bh_galaxy_perf:
       timeout: 30
       tier: 1
