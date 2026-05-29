@@ -19,6 +19,9 @@ from models.tt_dit.utils.padding import get_padded_vision_seq_len
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_pcc
 from tests.ttnn.unit_tests.operations.sdpa.sdpa_test_utils import fa_rand
 
+# Wormhole B0 worker-L1 override for ring MLA tests. On Blackhole we use the platform default.
+_WH_WORKER_L1_SIZE = 1344544
+
 
 def get_cache_file_path(cache_path, name, dtype, layout):
     """Generate the cache file path that ttnn.as_tensor would create."""
@@ -488,7 +491,7 @@ def run_ring_joint_sdpa(
             {
                 "trace_region_size": 1000000,
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
-                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
             },
             ttnn.Topology.Linear,
         ),
@@ -498,7 +501,7 @@ def run_ring_joint_sdpa(
                 "fabric_config": ttnn.FabricConfig.FABRIC_2D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
                 "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
-                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
             },
             ttnn.Topology.Linear,
         ),
@@ -863,20 +866,23 @@ def run_ring_joint_sdpa_perf(
 )
 @pytest.mark.parametrize("num_perf_runs", [5], ids=["5runs"])
 @pytest.mark.parametrize("num_links", [1, 2], ids=["1link", "2link"])
+# Perf parametrize. Unlike the accuracy block above, no `trace_region_size` is set: the
+# perf harness allocates trace separately when needed; setting it here would over-allocate
+# device L1 for runs that don't enable tracing.
 @pytest.mark.parametrize(
     "device_params, all_gather_topology",
     [
         (
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D,
-                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
             },
             ttnn.Topology.Linear,
         ),
         (
             {
                 "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
-                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
             },
             ttnn.Topology.Ring,
         ),
@@ -885,7 +891,7 @@ def run_ring_joint_sdpa_perf(
                 "fabric_config": ttnn.FabricConfig.FABRIC_2D,
                 "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
                 "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
-                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
             },
             ttnn.Topology.Linear,
         ),

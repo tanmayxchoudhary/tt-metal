@@ -28,6 +28,9 @@ from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_route
 from models.demos.deepseek_v3_d_p.utils.kv_cache_utils import init_kvpe_cache
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
+# Wormhole B0 worker-L1 override for ring MLA tests. On Blackhole we use the platform default.
+_WH_WORKER_L1_SIZE = 1344544
+
 
 def run_mla_inference(
     config,
@@ -131,17 +134,17 @@ def run_mla_inference(
     [
         {
             "fabric_config": ttnn.FabricConfig.FABRIC_1D,
-            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
         },
         {
             "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
-            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
         },
         {
             "fabric_config": ttnn.FabricConfig.FABRIC_2D,
             "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
             "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
-            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else _WH_WORKER_L1_SIZE,
         },
     ],
     ids=["line", "ring", "fabric2d"],
