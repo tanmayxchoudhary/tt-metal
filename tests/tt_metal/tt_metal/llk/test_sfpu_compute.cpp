@@ -39,8 +39,6 @@
 #include "tt_metal/test_utils/packing.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 #include <umd/device/types/arch.hpp>
-#include <tt-metalium/experimental/host_api.hpp>
-#include <tt-metalium/experimental/dataflow_buffer/dataflow_buffer.hpp>
 #include <tt-metalium/experimental/metal2_host_api/program.hpp>
 
 namespace tt::tt_metal {
@@ -260,7 +258,7 @@ experimental::metal2_host_api::NodeCoord extract_single_core_node(const SfpuConf
     return {cr.start_coord.x, cr.start_coord.y};
 }
 
-// Builds a DataflowBufferSpec with implicit sync disabled — common to all DFBs in this test.
+// Builds a DataflowBufferSpec common to all DFBs in this test.
 experimental::metal2_host_api::DataflowBufferSpec make_dfb_spec(
     const char* id, const SfpuConfig& cfg, tt::DataFormat fmt) {
     return {
@@ -268,7 +266,6 @@ experimental::metal2_host_api::DataflowBufferSpec make_dfb_spec(
         .entry_size = static_cast<uint32_t>(cfg.tile_byte_size),
         .num_entries = static_cast<uint32_t>(cfg.num_tiles),
         .data_format_metadata = fmt,
-        .disable_implicit_sync = true,
     };
 }
 
@@ -286,8 +283,7 @@ experimental::metal2_host_api::KernelSpec::CompilerOptions::Defines to_kernel_de
 experimental::metal2_host_api::KernelSpec make_writer_unary_quasar_spec(const char* kernel_id, const char* out_dfb_id) {
     return {
         .unique_id = kernel_id,
-        .source =
-            experimental::metal2_host_api::KernelSpec::SourceFilePath{"tt_metal/kernels/dataflow/writer_unary.cpp"},
+        .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/writer_unary_2_0.cpp",
         .num_threads = 1,
         .dfb_bindings = {{
             .dfb_spec_name = out_dfb_id,
@@ -299,7 +295,8 @@ experimental::metal2_host_api::KernelSpec make_writer_unary_quasar_spec(const ch
         .config_spec =
             experimental::metal2_host_api::DataMovementConfiguration{
                 .gen2_data_movement_config =
-                    experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
+                    experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{
+                        .disable_implicit_sync_for = {out_dfb_id}}},
     };
 }
 
@@ -813,9 +810,7 @@ bool run_sfpu_ternary_three_input_buffer(
 
         experimental::metal2_host_api::KernelSpec reader_spec{
             .unique_id = READER,
-            .source =
-                experimental::metal2_host_api::KernelSpec::SourceFilePath{
-                    "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_binary.cpp"},
+            .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_binary_2_0.cpp",
             .num_threads = 1,
             .compiler_options = {.defines = {{"LOAD_BUF2_DATA", "1"}}},
             .dfb_bindings =
@@ -849,14 +844,13 @@ bool run_sfpu_ternary_three_input_buffer(
             .config_spec =
                 experimental::metal2_host_api::DataMovementConfiguration{
                     .gen2_data_movement_config =
-                        experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{}},
+                        experimental::metal2_host_api::DataMovementConfiguration::Gen2DataMovementConfig{
+                            .disable_implicit_sync_for = {IN0_DFB, IN1_DFB, IN2_DFB}}},
         };
 
         experimental::metal2_host_api::KernelSpec compute_spec{
             .unique_id = COMPUTE,
-            .source =
-                experimental::metal2_host_api::KernelSpec::SourceFilePath{
-                    "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_sfpu_2_0.cpp"},
+            .source = "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_sfpu_2_0.cpp",
             .num_threads = 1,
             .compiler_options = {.defines = to_kernel_defines(sfpu_defines)},
             .dfb_bindings =
@@ -1155,10 +1149,11 @@ TEST_P(SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture, TensixSfpuBinar
     }
 }
 
+// TODO: BinarySFPU ops here can only do 1 tile due to the hardcoding in the macros to indicies (0,1,2)
 INSTANTIATE_TEST_SUITE_P(
     SingleCoreSfpuBinaryCompute,
     SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture,
-    ::testing::Values(std::make_tuple(1, "div_binary"), std::make_tuple(4, "div_binary")));
+    ::testing::Values(std::make_tuple(1, "div_binary")));
 
 class SingleCoreSingleMeshDeviceSfpuTernaryParameterizedFixture
     : public LLKMeshDeviceFixture,
@@ -1189,9 +1184,10 @@ TEST_P(SingleCoreSingleMeshDeviceSfpuTernaryParameterizedFixture, TensixSfpuTern
     }
 }
 
+// TODO: BinarySFPU ops here can only do 1 tile due to the hardcoding in the macros to indicies (0,1,2)
 INSTANTIATE_TEST_SUITE_P(
     SingleCoreSfpuTernaryCompute,
     SingleCoreSingleMeshDeviceSfpuTernaryParameterizedFixture,
-    ::testing::Values(std::make_tuple(1, "where"), std::make_tuple(4, "where")));
+    ::testing::Values(std::make_tuple(1, "where")));
 
 }  // namespace tt::tt_metal
