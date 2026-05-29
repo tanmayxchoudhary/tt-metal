@@ -75,7 +75,7 @@ void kernel_main() {
                         compute_kernel_lib::untilize_config::WaitMode::WaitBlock,
                         compute_kernel_lib::untilize_config::ReconfigureRegisterDatatypeMode::UnpackReconfigure>(1);
 
-                    mm_init_short_with_dt(cb_in0, cb_in1, cb_intermed0, transpose_hw);
+                    mm_init_short(cb_in0, cb_in1, cb_intermed0, transpose_hw);
                 }
                 cb_in0_obj.pop_front(Kt);
 
