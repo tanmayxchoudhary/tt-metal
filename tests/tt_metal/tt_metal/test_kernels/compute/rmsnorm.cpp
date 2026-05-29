@@ -13,11 +13,7 @@
 #include "api/compute/layernorm.h"
 
 ALWI void ACQ() { tile_regs_acquire(); }
-ALWI void REL() {
-    tile_regs_commit();
-    tile_regs_wait();
-    tile_regs_release();
-}
+ALWI void REL() { tile_regs_release(); }
 
 void kernel_main() {
     const uint32_t NCHt = get_arg_val<uint32_t>(0);
@@ -80,6 +76,10 @@ void kernel_main() {
             cb_reserve_back(cb_x, blk);
             for (uint32_t j = 0; j < blk; j++) {
                 add_tiles(cb_in, cb_inb, j, j, j);
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t j = 0; j < blk; j++) {
                 pack_tile(j, cb_x);
             }
             REL();
@@ -101,6 +101,10 @@ void kernel_main() {
             for (uint32_t wtr = 0; wtr < blk; wtr++) {
                 mul_tiles(cb_x, cb_x, wt + wtr, wt + wtr, wtr);
                 // mul_tiles(cb_xmm, cb_col1, wt+wtr, wt+wtr, wtr);
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wtr = 0; wtr < blk; wtr++) {
                 pack_tile(wtr, cb_x2);
             }
             cb_push_back(cb_x2, blk);
@@ -124,6 +128,8 @@ void kernel_main() {
         }
         cb_pop_front(cb_x2, Wt);
         reduce_uninit();
+        tile_regs_commit();
+        tile_regs_wait();
         pack_tile(dst0, cb_ex2);
         REL();
 
@@ -140,6 +146,8 @@ void kernel_main() {
         cb_reserve_back(cb_ex2pe, 1);  // 1
         rsqrt_tile_init();
         rsqrt_tile(dst0);
+        tile_regs_commit();
+        tile_regs_wait();
         pack_tile(dst0, cb_ex2pe);
         cb_push_back(cb_ex2pe, 1);
         REL();
@@ -160,6 +168,10 @@ void kernel_main() {
             for (uint32_t wtr = 0; wtr < blk; wtr++) {
                 // cb_xmm[wt+wtr] since we pop Wt from cb_xmm after the entire loop
                 mul_tiles_bcast_cols(cb_x, cb_ex2pe, wt + wtr, 0, wtr);  // tile *= 1/(sum(exp(x)))
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wtr = 0; wtr < blk; wtr++) {
                 pack_tile(wtr, cb_im_or_out);  // pack either to intermediate (cb_fusion or out0)
             }
             cb_push_back(cb_im_or_out, blk);  // if no gamma/beta are provided, this will be passed on to the writer
@@ -174,6 +186,10 @@ void kernel_main() {
                 cb_wait_front(cb_fusion, blk);
                 for (uint32_t wtr = 0; wtr < blk; wtr++) {
                     mul_tiles_bcast_rows(cb_fusion, cb_gamma, wtr, wt + wtr, wtr);  // tile *= 1/(sum(exp(x)))
+                }
+                tile_regs_commit();
+                tile_regs_wait();
+                for (uint32_t wtr = 0; wtr < blk; wtr++) {
                     pack_tile(wtr, cb_outg);  // pack either to intermediate (cb_fusion or out0)
                 }
                 cb_pop_front(cb_fusion, blk);
@@ -190,6 +206,10 @@ void kernel_main() {
                 cb_wait_front(cb_fusion, blk);
                 for (uint32_t wtr = 0; wtr < blk; wtr++) {
                     add_tiles_bcast_rows(cb_fusion, cb_beta, wtr, wt + wtr, wtr);  // tile *= 1/(sum(exp(x)))
+                }
+                tile_regs_commit();
+                tile_regs_wait();
+                for (uint32_t wtr = 0; wtr < blk; wtr++) {
                     pack_tile(wtr, tt::CBIndex::c_16);  // pack either to intermediate (cb_fusion or out0)
                 }
                 cb_pop_front(cb_fusion, blk);

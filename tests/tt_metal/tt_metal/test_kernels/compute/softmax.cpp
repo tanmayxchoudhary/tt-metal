@@ -11,11 +11,7 @@
 #include "api/compute/reduce.h"
 
 ALWI void ACQ() { tile_regs_acquire(); }
-ALWI void REL() {
-    tile_regs_commit();
-    tile_regs_wait();
-    tile_regs_release();
-}
+ALWI void REL() { tile_regs_release(); }
 
 // for scale+mask+softmax:
 // bcast HW (mul by 1 tile)  example: (  [2,1,1024,64] * [1,1,32,32]  )
@@ -65,6 +61,10 @@ void kernel_main() {
             cb_reserve_back(cb_scale_mask, ndst);
             for (uint32_t wt8 = 0; wt8 < ndst; wt8++) {
                 mul_tiles_bcast_scalar(cb_in0, cb_fused_scale, wt8, 0, wt8);  // mul bcast-HW -> DST[wt8]
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wt8 = 0; wt8 < ndst; wt8++) {
                 pack_tile(wt8, cb_scale_mask);                                // reuse exps buffer
             }
             cb_push_back(cb_scale_mask, ndst);
@@ -87,6 +87,10 @@ void kernel_main() {
             exp_tile_init<true>();
             for (uint32_t wt8 = 0; wt8 < ndst; wt8++) {
                 exp_tile<true>(wt8);      // exp on DST[0]
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wt8 = 0; wt8 < ndst; wt8++) {
                 pack_tile(wt8, cb_exps);  // reuse the exps buffer again, this time in a circular manner
             }
             cb_push_back(cb_exps, ndst);
@@ -116,6 +120,10 @@ void kernel_main() {
             exp_tile_init<true>();
             for (uint32_t wt8 = 0; wt8 < ndst; ++wt8) {
                 exp_tile<true>(wt8);      // exp on DST[0]
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wt8 = 0; wt8 < ndst; ++wt8) {
                 pack_tile(wt8, cb_exps);  // DST[0]->cb_id[wt]
             }
             cb_push_back(cb_exps, ndst);
@@ -134,6 +142,8 @@ void kernel_main() {
         reduce_uninit();
         recip_tile_init();
         recip_tile(dst0);  // DST[0] = 1/sum(exp(x))
+        tile_regs_commit();
+        tile_regs_wait();
         pack_tile(dst0, cb_recipsumexps);
         cb_push_back(cb_recipsumexps, 1);
 
@@ -151,6 +161,10 @@ void kernel_main() {
                 // wt+wt8 since we pop Wt after the entire loop
                 mul_tiles_bcast<BroadcastType::COL>(
                     cb_exps, cb_recipsumexps, wt + wt8, 0, wt8);  // tile *= 1/(sum(exp(x)))
+            }
+            tile_regs_commit();
+            tile_regs_wait();
+            for (uint32_t wt8 = 0; wt8 < ndst; wt8++) {
                 pack_tile(wt8, tt::CBIndex::c_16);
             }
             cb_push_back(tt::CBIndex::c_16, ndst);
