@@ -49,14 +49,14 @@ The initial release of the 3-tier model CI includes models owned by the models-t
 ## Tier 2 Models
 | Model | Systems |
 |-------|---------|
-| GPT-OSS 20B | WH LLMBox, BH P150, BH LoudBox, BH QuietBox 2 |
-| Llama3.1-8B | WH LLMBox, BH LoudBox, BH QuietBox 2 |
+| GPT-OSS 20B | WH LLMBox, BH P150, BH QuietBox 2 |
+| Llama3.1-8B | WH LLMBox, BH QuietBox 2 |
 | Llama3.1-8B-DP | WH LLMBox |
-| Llama3.3-70B | WH LLMBox, BH LLMBox, BH LoudBox, BH QuietBox 2 |
-| Qwen3-32B | WH LLMBox, BH LLMBox, BH LoudBox, BH QuietBox 2 |
-| Qwen2.5-32B | WH LLMBox, BH LoudBox |
+| Llama3.3-70B | WH LLMBox, BH QuietBox 2 |
+| Qwen3-32B | WH LLMBox, BH QuietBox 2 |
+| Qwen2.5-32B | WH LLMBox, BH QuietBox 2 |
 | Qwen2.5-Coder-32B | WH LLMBox |
-| Qwen2.5-72B-VL | WH LLMBox, BH LoudBox |
+| Qwen2.5-72B-VL | WH LLMBox, BH QuietBox 2 |
 | Llama90B-VL | WH LLMBox |
 | Shallow-UNet | WH N150, WH LLMBox |
 | Mistral-7B | WH N150 |
@@ -77,7 +77,8 @@ The initial release of the 3-tier model CI includes models owned by the models-t
 | Llama3.2-11B-Vision | WH LLMBox |
 | QwQ-32B | WH LLMBox |
 | Qwen2.5-7B | WH N300 |
-| Qwen2.5-VL-32B | WH LLMBox, BH LoudBox |
+| Qwen2.5-VL-32B | WH LLMBox, BH QuietBox 2 |
+| Mamba-2.8B | WH N150 |
 | Phi-3-mini | WH N150 |
 
 
