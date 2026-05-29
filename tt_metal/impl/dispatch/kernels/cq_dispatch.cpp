@@ -303,7 +303,6 @@ void completion_queue_push_back(uint32_t num_pages) {
 void process_write_host_h() {
     volatile tt_l1_ptr CQDispatchCmd* cmd = (volatile tt_l1_ptr CQDispatchCmd*)cmd_ptr;
 
-    uint32_t completion_write_ptr;
     // We will send the cmd back in the first X bytes, this makes the logic of reserving/pushing completion queue
     // pages much simpler since we are always sending writing full pages (except for last page)
     uint64_t wlength = cmd->write_linear_host.length;
