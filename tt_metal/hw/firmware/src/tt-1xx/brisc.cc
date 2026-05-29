@@ -179,8 +179,6 @@ void enable_power_management() {
 }
 
 void set_deassert_addresses() {
-    volatile tt_reg_ptr uint32_t* cfg_regs = core.cfg_regs_base(0);
-
 #ifdef ARCH_BLACKHOLE
     WRITE_REG(RISCV_DEBUG_REG_NCRISC_RESET_PC, MEM_NCRISC_FIRMWARE_BASE);
     WRITE_REG(RISCV_DEBUG_REG_TRISC0_RESET_PC, MEM_TRISC0_FIRMWARE_BASE);
