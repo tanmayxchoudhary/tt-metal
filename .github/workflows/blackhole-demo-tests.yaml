@@ -134,17 +134,7 @@ jobs:
               systems = yaml.safe_load(f) or {}
 
           sku_to_system = {s["sku"]: s["name"] for s in systems.get("systems", [])}
-          # These models are now covered by tiered e2e pipelines and should
-          # no longer run in the legacy blackhole demo workflow.
-          migrated_to_tiered_e2e = {
-              "whisper",
-              "llama3.1-8b",
-              "llama3.3-70b",
-              "qwen3-32b",
-              "qwen2.5-vl-32b-instruct",
-              "qwen2.5-vl-72b",
-              "gpt-oss-120b",
-          }
+
           selected_model = os.environ["SELECTED_MODEL"]
           system_filter = os.environ["SYSTEM_TYPE_FILTER"]
 
@@ -153,8 +143,6 @@ jobs:
           for t in tests:
               m = t.get("model-name")
               if not m:
-                  continue
-              if m in migrated_to_tiered_e2e:
                   continue
               if m not in all_models:
                   all_models.append(m)
