@@ -672,15 +672,54 @@ CSV path: `generated/profiler/reports/<name>/<timestamp>/ops_perf_results_<name>
 
 ## What to do next
 
-1. Switch to `ipotkonjak/chunked_attn_mla_rotation` (create from
-   `chunked_attn_mla` + merge `chunked_attn_tests`; see Phase 0 section above).
-2. **Cherry-pick** Phase 1 commits `ae4ef53609e`, `18aa72190df`, `b2fad4bfdf3`
-   from `ipotkonjak/kv_cache_per_chip_offset` (or just rebase them; the kv-cache
-   op work is self-contained).
-3. **Phase 2 (`MLA.forward` wiring)**: thread `kv_actual_isl` through; call
-   the new op from the chunked branch with `slot_idx=cache_user_id`,
-   `layer_idx=cache_layer_idx`, `num_layers=self.num_cache_layers` (derived
-   from the existing `cache_batch_idx = cache_user_id * num_cache_layers + cache_layer_idx`
-   pattern). Pass `kv_actual_isl` through to SDPA too with `logical_n = kv_actual_isl + chunk_size_global`.
-4. **Phase 3 (rotated MLA test)**: per the original test scope.
-5. **Phase 4 (regression sweep)**: as described in original Phase 4 section.
+### Integration-branch setup status (DONE)
+
+`ipotkonjak/chunked_attn_mla_rotation` is live:
+
+- Branched from `ipotkonjak/chunked_attn_mla` at `aa54d2def6a`.
+- Merged `ipotkonjak/chunked_attn_tests` (merge commit `14b201ddac5`). All SDPA-side
+  conflicts resolved by taking the rotation-branch (`chunked_attn_tests`) version.
+- Cherry-picked Phase 1 commits from `ipotkonjak/kv_cache_per_chip_offset`:
+  `afdb3754d72` (wip), `59eba3cb0d4` (writer-kernel idxt math),
+  `ee8a75a2bcd` (slot_idx/layer_idx/num_layers split), `c90f6cc977a` (plan doc).
+- **Reconciled the merge regression**: cherry-picked `84e3b92941d` (`wip: support for 1 nhv`)
+  and `ee81d466ceb` (`read v from k`) on top — the chunked MLA path's latent-V
+  + NHV-aware V-chain SDPA-op changes that were lost when the merge took
+  `chunked_attn_tests`' stricter SDPA validations. Conflicts resolved by
+  keeping HEAD's mla.py (newer than the intermediate state these commits
+  introduced) and grafting the v_batch chain semaphores + `v_shares_k_buffer`
+  flag into the rotation-aware reader CT-arg layout: NHV at slot 28,
+  `v_shares_k_buffer` at slot 29, `TensorAccessorArgs<30>` for the buffer
+  accessors, and `cb_arg_offset` extended to skip the v_batch chain's 4 args.
+
+### Sanity sweep on integration branch (2026-05-29 EOD)
+
+| Test suite | Result |
+|---|---|
+| `test_deepseek_prefill_update_padded_kv_cache.py` math + torch showcase + perf (2x4) | **16/16 pass** |
+| `test_kv_pad_aware_rotation_ttnn` (2x4, all 3 scenarios) | **3/3 pass** |
+| `test_mla_chunked_prefill` (seq10k, N=2, q ∈ {32, 64, 128}, 2x4) | **3/3 pass** |
+| `test_mla_chunked_prefill` (seq10k, N=2, q=320, 2x4) | **fails L1 budget** — unrelated to merge (CB allocation > 1.5 MB L1) |
+
+The merge + reconciliation is correctness-clean. The q320 OOM is an existing
+test-config limitation that predates this work.
+
+### Remaining phases
+
+3. **Phase 2 (`MLA.forward` wiring with rotation)**: thread `kv_actual_isl`
+   through; in the chunked branch, when `kv_actual_isl is not None` swap the
+   `fill_cache_for_user_` call for `update_padded_kv_cache(slot_idx=cache_user_id,
+   layer_idx=cache_layer_idx, num_layers=self.num_cache_layers,
+   kv_actual_global=kv_actual_isl, cluster_axis=self.sp_axis)` and pass
+   `kv_actual_isl` + `logical_n = kv_actual_isl + chunk_size_global` to SDPA.
+4. **Phase 3 (rotated MLA test)**: 2-chunk 10K scenario (iter 0 partial,
+   iter 1 rotation) — per the original test scope.
+5. **Phase 4 (regression sweep)**: as originally described.
+
+### Spike 2 still pending (gates Phase 2)
+
+Rotation op + full-cache K shape with `cache_batch_idx`. Verify by modifying
+`test_kv_pad_aware_rotation_ttnn` to pass K reshaped as
+`[num_users * num_layers, 1, 2*chunk_local, kvpe]` with `cache_batch_idx=0`
+and re-running. If it passes, MLA can pass `kvpe_cache` directly to SDPA
+under rotation (same pattern as the existing non-rotated chunked path).
