@@ -18,7 +18,11 @@ namespace ttnn::operations::experimental::deepseek_prefill::update_padded_kv_cac
 
 struct UpdatePaddedKvCacheDeviceOperation {
     struct operation_attributes_t {
-        uint32_t batch_idx;
+        // Cache slot is linearized as users-outer, layers-inner:
+        //   batch_idx = slot_idx * num_layers + layer_idx
+        uint32_t slot_idx;
+        uint32_t layer_idx;
+        uint32_t num_layers;
         uint32_t kv_actual_global;  // in tokens; tile-aligned
         uint32_t cluster_axis;
     };
@@ -56,7 +60,9 @@ namespace ttnn::prim {
 ttnn::Tensor update_padded_kv_cache(
     const ttnn::Tensor& cache,
     const ttnn::Tensor& input,
-    uint32_t batch_idx,
+    uint32_t slot_idx,
+    uint32_t layer_idx,
+    uint32_t num_layers,
     uint32_t kv_actual_global,
     uint32_t cluster_axis);
 

@@ -17,11 +17,17 @@ namespace ttnn::operations::experimental::deepseek_prefill::update_padded_kv_cac
 // write at different offsets so that new tokens overwrite the trailing pad cells of the prior
 // cache before spilling into the next slab.
 //
+// Cache slot is addressed with users-outer, layers-inner linearization — the op composes
+// `batch_idx = slot_idx * num_layers + layer_idx`. For a single-user prefill workload, callers
+// pass `slot_idx=0` and the desired `layer_idx`.
+//
 // In-place: returns a handle to `cache`.
 ttnn::Tensor update_padded_kv_cache(
     const ttnn::Tensor& cache,
     const ttnn::Tensor& input,
-    uint32_t batch_idx,
+    uint32_t slot_idx,
+    uint32_t layer_idx,
+    uint32_t num_layers,
     uint32_t kv_actual_global,
     uint32_t cluster_axis);
 

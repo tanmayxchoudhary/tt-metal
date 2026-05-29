@@ -83,8 +83,25 @@ void UpdatePaddedKvCacheDeviceOperation::validate_on_program_cache_miss(
     TT_FATAL(
         args.kv_actual_global % TILE_HEIGHT == 0, "kv_actual_global ({}) must be tile-aligned", args.kv_actual_global);
 
+    TT_FATAL(args.num_layers > 0, "num_layers must be positive");
     TT_FATAL(
-        args.batch_idx < cache_shape[0], "batch_idx {} out of range (cache batch {})", args.batch_idx, cache_shape[0]);
+        cache_shape[0] % args.num_layers == 0,
+        "cache batch dim ({}) must be a multiple of num_layers ({})",
+        cache_shape[0],
+        args.num_layers);
+    TT_FATAL(
+        args.layer_idx < args.num_layers,
+        "layer_idx {} out of range for num_layers {}",
+        args.layer_idx,
+        args.num_layers);
+    const uint32_t num_slots = cache_shape[0] / args.num_layers;
+    TT_FATAL(
+        args.slot_idx < num_slots,
+        "slot_idx {} out of range for num_slots {} (cache_batch={}, num_layers={})",
+        args.slot_idx,
+        num_slots,
+        cache_shape[0],
+        args.num_layers);
 
     // Verify cluster-axis sizing: the cache holds `sp_factor` copies of the per-chip slot globally.
     const uint32_t sp_factor = sp_factor_for_tensor(cache, args.cluster_axis);
@@ -115,14 +132,15 @@ UpdatePaddedKvCacheDeviceOperation::tensor_return_value_t UpdatePaddedKvCacheDev
 
 ttsl::hash::hash_t UpdatePaddedKvCacheDeviceOperation::compute_program_hash(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
-    // batch_idx and kv_actual_global are runtime args read by the writer kernel — kept OUT
-    // of the hash so successive chunks reuse the cached program; rt-args refresh on cache hits
-    // via apply_descriptor_runtime_args. cluster_axis stays IN the hash: it determines which
-    // mesh dim is sp, which changes the structural meaning of sp_factor / my_sp_coord — a
-    // structural property, not a per-call data value.
+    // Per-call data values (slot_idx, layer_idx, kv_actual_global) are runtime args read by
+    // the writer kernel and intentionally NOT in the hash, so successive chunks reuse the
+    // cached program; rt-args refresh on cache hits via apply_descriptor_runtime_args.
+    // num_layers and cluster_axis stay IN: both are structural — they govern the cache slot
+    // linearization (num_layers) and which mesh dim is sp (cluster_axis) — not per-call data.
     const auto& cache = tensor_args.cache;
     const auto& input = tensor_args.input;
     return tt::tt_metal::operation::hash_operation<UpdatePaddedKvCacheDeviceOperation>(
+        args.num_layers,
         args.cluster_axis,
         input.dtype(),
         input.memory_config(),
@@ -204,12 +222,15 @@ tt::tt_metal::ProgramDescriptor UpdatePaddedKvCacheDeviceOperation::ProgramFacto
     writer_kernel.config = WriterConfigDescriptor{};
 
     // Common rt-args: per-chip kernel inputs for on-device update_idxt + start_id derivation.
+    // Slot+layer kept separate (kernel composes batch_idx = slot_idx * num_layers + layer_idx).
     writer_kernel.emplace_common_runtime_args({
         kv_actual_global_t,
         my_sp_coord,
         sp_factor,
         input_Ht,
-        args.batch_idx,
+        args.slot_idx,
+        args.layer_idx,
+        args.num_layers,
         Wt,
         cache_HtWt,
         cache_CHtWt,
@@ -262,13 +283,17 @@ namespace ttnn::prim {
 ttnn::Tensor update_padded_kv_cache(
     const ttnn::Tensor& cache,
     const ttnn::Tensor& input,
-    uint32_t batch_idx,
+    uint32_t slot_idx,
+    uint32_t layer_idx,
+    uint32_t num_layers,
     uint32_t kv_actual_global,
     uint32_t cluster_axis) {
     using OperationType =
         ttnn::operations::experimental::deepseek_prefill::update_padded_kv_cache::UpdatePaddedKvCacheDeviceOperation;
     auto attrs = OperationType::operation_attributes_t{
-        .batch_idx = batch_idx,
+        .slot_idx = slot_idx,
+        .layer_idx = layer_idx,
+        .num_layers = num_layers,
         .kv_actual_global = kv_actual_global,
         .cluster_axis = cluster_axis,
     };
