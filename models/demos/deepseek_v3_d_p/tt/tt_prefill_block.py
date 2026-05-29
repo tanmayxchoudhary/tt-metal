@@ -41,7 +41,7 @@ class TtPrefillBlock(LightweightModule):
 
     @staticmethod
     def check_cache_complete(cache_path: Path, layer_idx: int, is_dense: bool, experts_per_chip: int = 8) -> bool:
-        """Check if block cache is complete (norms + MLA + FFN/MoE)."""
+        """Check if block cache is complete (full block: attn_norm + MLA + ffn_norm + FFN/MoE)."""
         prefix = f"layer_{layer_idx}"
 
         if not TtDistributedRmsNorm.check_cache_complete(cache_path, f"{prefix}.attn_norm"):
@@ -78,6 +78,7 @@ class TtPrefillBlock(LightweightModule):
         routed_expert_weights_dtype=ttnn.bfloat4_b,
         shared_expert_activations_dtype=ttnn.bfloat16,
         shared_expert_weights_dtype=ttnn.bfloat8_b,
+        kv_only: bool = False,
     ):
         """
         Build TTNN cache for this block (norms + MLA + FFN/MoE) without device copy.
@@ -114,7 +115,13 @@ class TtPrefillBlock(LightweightModule):
             seq_len=seq_len,
             sp_axis=sp_axis,
             tp_axis=tp_axis,
+            kv_only=kv_only,
         )
+
+        if kv_only:
+            # The kv-only last layer has no ffn_norm / FFN / MoE.
+            logger.info(f"Cache built for layer {layer_idx} (kv_only)")
+            return
 
         # Build ffn_norm cache
         TtDistributedRmsNorm.build_ttnn_cache(
@@ -183,16 +190,21 @@ class TtPrefillBlock(LightweightModule):
         shared_expert_activations_dtype=ttnn.bfloat16,
         shared_expert_weights_dtype=ttnn.bfloat8_b,
         weight_cache_path: Optional[Path] = None,
+        kv_only: bool = False,
     ):
         super().__init__()
         self.mesh_device = mesh_device
         self.num_links = num_links
         self.topology = topology
         self.is_moe = layer_idx >= DeepSeekV3Config.NUM_DENSE_LAYERS
+        self.kv_only = kv_only
 
         emb_dim = config.hidden_size
 
-        logger.info(f"Building TtPrefillBlock layer_idx={layer_idx} ({'MoE' if self.is_moe else 'dense'})")
+        logger.info(
+            f"Building TtPrefillBlock layer_idx={layer_idx} "
+            f"({'MoE' if self.is_moe else 'dense'}, kv_only={kv_only})"
+        )
 
         # --- Attention norm ---
         self.attn_norm = TtDistributedRmsNorm(
@@ -217,7 +229,12 @@ class TtPrefillBlock(LightweightModule):
             tp_axis=tp_axis,
             is_balanced=is_balanced,
             weight_cache_path=weight_cache_path,
+            kv_only=kv_only,
         )
+
+        if kv_only:
+            # Last layer: no FFN norm, no FFN/MoE. Forward returns after MLA.
+            return
 
         # --- FFN norm ---
         self.ffn_norm = TtDistributedRmsNorm(
@@ -361,6 +378,13 @@ class TtPrefillBlock(LightweightModule):
             actual_isl=actual_isl,
         )
         ttnn.deallocate(attn_norm_out)
+
+        if self.kv_only:
+            # KV cache filled (by MLA), migration callback fired. The block
+            # output is unused (no FFN, no further layers). Return (None, None)
+            # so the transformer can short-circuit.
+            return None, None
+
         x = ttnn.add(x, mla_out)
         ttnn.deallocate(mla_out)
 

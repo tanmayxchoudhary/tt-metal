@@ -27,7 +27,6 @@ NUM_LAYERS = int(os.environ.get("PREFILL_NUM_LAYERS", 61))
 MAX_SEQ_LEN = int(os.environ.get("PREFILL_MAX_SEQ_LEN", 3200 * _sp))
 IS_BALANCED = os.environ.get("PREFILL_IS_BALANCED", "1") == "1"
 CAPACITY_FACTOR = int(os.environ.get("PREFILL_CAPACITY_FACTOR", 8))
-_gate_mode_name = os.environ.get("PREFILL_GATE_FALLBACK_MODE", "DEVICE_FP32")
 PREFILL_DEBUG = os.environ.get("PREFILL_DEBUG", "0") == "1"
 
 _shutdown = False
@@ -97,18 +96,13 @@ def run_standalone_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
     """Run a single prefill from a JSON file (no C++ server / SHM required).
 
     Reads PREFILL_STANDALONE_INPUT (default: standalone_input.json next to this
-    script).  File format:
+    script). File format:
         {
             "task_id": <int>,
-            "token_ids": [<int>, ...],
-            // Optional ground-truth check; both fields are optional. If
-            // expected_token_id is present and doesn't match the produced
-            // first_token, the runner exits non-zero. expected_token is just
-            // a human-readable hint for log messages (e.g., "lo").
-            "expected_token_id": <int>,
-            "expected_token": "<str>"
+            "token_ids": [<int>, ...]
         }
-    Prints the first generated token to stdout.
+    The pipeline runs the kv-only last layer (no first_token, no LM head); the
+    runner just logs per-iter timing.
     """
     import json
     import time as _time
@@ -122,11 +116,9 @@ def run_standalone_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
 
     task_id = data["task_id"]
     token_ids = list(data["token_ids"])
-    expected_token_id = data.get("expected_token_id")
-    expected_token = data.get("expected_token")
 
     logger.info(
-        f"[standalone] task_id={task_id} num_tokens={len(token_ids)} " f"first5={token_ids[:5]} last5={token_ids[-5:]}"
+        f"[standalone] task_id={task_id} num_tokens={len(token_ids)} first5={token_ids[:5]} last5={token_ids[-5:]}"
     )
 
     if len(token_ids) > MAX_SEQ_LEN:
@@ -144,10 +136,9 @@ def run_standalone_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
 
     num_iterations = int(os.environ.get("PREFILL_STANDALONE_ITERS", "1"))
     iter_times_ms = []
-    first_token = None
     for i in range(num_iterations):
         _t0 = _time.perf_counter()
-        first_token = pipeline.prefill(token_ids=token_ids, slot_id=0, actual_isl=actual_isl)
+        pipeline.prefill(token_ids=token_ids, slot_id=0, actual_isl=actual_isl)
         _dt_ms = (_time.perf_counter() - _t0) * 1000.0
         iter_times_ms.append(_dt_ms)
         logger.info(
@@ -155,33 +146,21 @@ def run_standalone_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
             f"pipeline.prefill() = {_dt_ms:.2f} ms"
         )
     logger.info(f"[iter timing summary] per-iter ms = {[round(t,2) for t in iter_times_ms]}")
-
-    # stdout, not a log line: callers (tests / orchestrators) parse this.
-    print(f"[standalone] first_token={first_token}")
-    logger.info(f"Sent token {first_token} for task {task_id}")
-
-    if expected_token_id is not None:
-        hint = f" ({expected_token!r})" if expected_token is not None else ""
-        if first_token == expected_token_id:
-            logger.info(
-                f"[standalone] ground-truth check OK: first_token={first_token} matches "
-                f"expected_token_id={expected_token_id}{hint}"
-            )
-        else:
-            raise AssertionError(
-                f"[standalone] ground-truth mismatch: produced first_token={first_token}, "
-                f"expected expected_token_id={expected_token_id}{hint}"
-            )
+    print(f"[standalone] task_id={task_id} done")
 
 
 def run_request_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
-    """Read prefill requests from SHM, run pipeline.prefill, write tokens back.
+    """Read prefill requests from SHM (c2p) and run pipeline.prefill.
 
     SharedMemory lives in the C++ inference server's tree at
     cpp_server/src/runners/shared_memory.py. The launcher (the C++ server's
     Python child-process wrapper) must put cpp_server/src on PYTHONPATH; this
     runner imports it lazily so standalone mode (which doesn't need SHM) works
     regardless of that PYTHONPATH entry.
+
+    There is no p2c write-back: the last layer runs kv-only, no first-token is
+    produced, and request completion is signaled by the migration KV write
+    landing on the decode side.
     """
     try:
         from runners.shared_memory import PREFILL_MAX_TOKEN_IDS, SharedMemory
@@ -193,16 +172,13 @@ def run_request_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
         ) from exc
 
     c2p_name = os.environ.get("TT_IPC_SHM_C2P")
-    p2c_name = os.environ.get("TT_IPC_SHM_P2C")
-    if not (c2p_name and p2c_name):
-        raise RuntimeError("TT_IPC_SHM_C2P / TT_IPC_SHM_P2C must be set")
+    if not c2p_name:
+        raise RuntimeError("TT_IPC_SHM_C2P must be set")
 
-    logger.info(f"Opening SHM C2P={c2p_name} P2C={p2c_name}")
+    logger.info(f"Opening SHM C2P={c2p_name}")
     import time as _time
 
-    with SharedMemory(c2p_name, max_token_ids=PREFILL_MAX_TOKEN_IDS, is_shutdown=_is_shutdown) as c2p, SharedMemory(
-        p2c_name, max_token_ids=1, is_shutdown=_is_shutdown
-    ) as p2c:
+    with SharedMemory(c2p_name, max_token_ids=PREFILL_MAX_TOKEN_IDS, is_shutdown=_is_shutdown) as c2p:
         logger.info("SHM bridge started, waiting for prefill requests...")
 
         while not _shutdown:
@@ -234,7 +210,7 @@ def run_request_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
                 token_ids = token_ids + [1] * (MAX_SEQ_LEN - len(token_ids))
 
             _t0 = _time.perf_counter()
-            first_token = pipeline.prefill(
+            pipeline.prefill(
                 token_ids=token_ids,
                 slot_id=0,
                 actual_isl=actual_isl,
@@ -247,9 +223,6 @@ def run_request_loop(pipeline: TtDeepSeekPrefillPipeline) -> None:
                 f"pipeline.prefill() = {_dt_ms:.2f} ms"
             )
 
-            p2c.write_token(task_id, first_token)
-            logger.info(f"Sent token {first_token} for task {task_id}")
-
     logger.info("Request loop exited")
 
 
@@ -260,14 +233,12 @@ def _print_config() -> None:
         ("DEEPSEEK_V3_HF_MODEL", os.environ.get("DEEPSEEK_V3_HF_MODEL", UNSET)),
         ("TT_DS_PREFILL_TTNN_CACHE", os.environ.get("TT_DS_PREFILL_TTNN_CACHE", DEFAULT_TTNN_CACHE)),
         ("TT_IPC_SHM_C2P", os.environ.get("TT_IPC_SHM_C2P", UNSET)),
-        ("TT_IPC_SHM_P2C", os.environ.get("TT_IPC_SHM_P2C", UNSET)),
         ("PREFILL_SP", str(_sp)),
         ("PREFILL_TP", str(_tp)),
         ("PREFILL_NUM_LAYERS", str(NUM_LAYERS)),
         ("PREFILL_MAX_SEQ_LEN", str(MAX_SEQ_LEN)),
         ("PREFILL_IS_BALANCED", str(IS_BALANCED)),
         ("PREFILL_CAPACITY_FACTOR", str(CAPACITY_FACTOR)),
-        ("PREFILL_GATE_FALLBACK_MODE", _gate_mode_name),
         ("PREFILL_STANDALONE", os.environ.get("PREFILL_STANDALONE", "0")),
         ("PREFILL_STANDALONE_INPUT", os.environ.get("PREFILL_STANDALONE_INPUT", "<default>")),
         ("PREFILL_STANDALONE_ITERS", os.environ.get("PREFILL_STANDALONE_ITERS", "1")),
@@ -336,7 +307,7 @@ def main() -> None:
         is_balanced=IS_BALANCED,
         num_links=2,
         capacity_factor=CAPACITY_FACTOR,
-        gate_fallback_mode=GateComputeMode[_gate_mode_name],
+        gate_fallback_mode=GateComputeMode.DEVICE_FP32,
         weight_cache_path=cache_path,
     )
 

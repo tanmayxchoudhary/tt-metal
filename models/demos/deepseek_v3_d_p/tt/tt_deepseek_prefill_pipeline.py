@@ -119,6 +119,7 @@ class TtDeepSeekPrefillPipeline:
             shared_expert_weights_dtype=self.config.shared_expert_weights_dtype,
             weight_cache_path=self.config.weight_cache_path,
             lm_head_is_column_parallel=True,
+            kv_only_last_layer=True,
         )
         self.model_built = True
 
@@ -160,7 +161,14 @@ class TtDeepSeekPrefillPipeline:
         slot_id: int,
         actual_isl: Optional[int] = None,
         dst_slot: Optional[int] = None,
-    ) -> int:
+    ) -> None:
+        """Run one prefill iteration.
+
+        The last transformer layer runs kv-only: it fills the KV cache and fires
+        the migration callback but skips Q-side compute, SDPA, output projection,
+        FFN/MoE, final RMSNorm, and the LM head. No first-token is produced —
+        migration handles downstream signaling.
+        """
         assert self.compiled, "Call compile() before prefill()"
         if actual_isl is None:
             actual_isl = len(token_ids)
@@ -170,14 +178,13 @@ class TtDeepSeekPrefillPipeline:
         tt_token_ids = self._prepare_input_tensor(token_ids)
         on_layer_complete = self._build_migration_callback(slot_id, actual_isl, dst_slot)
 
-        first_token_id, _first_token_prob, _ = self.model.forward(
+        self.model.forward(
             tt_token_ids,
             self.kvpe_cache,
             number_of_non_padded_tokens=actual_isl,
             on_layer_complete=on_layer_complete,
             temperature=0.0,
         )
-        return int(first_token_id)
 
     def _prepare_input_tensor(self, token_ids: list[int]) -> ttnn.Tensor:
         sp_factor = self.config.sp_factor

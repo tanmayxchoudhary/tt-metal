@@ -52,6 +52,7 @@ class ttMLA:
         tp_axis: int = 1,
         cache_path: Path | None = None,
         device: ttnn.MeshDevice | None = None,
+        kv_only: bool = False,
     ) -> dict | None:
         """
         Shared logic for converting MLA weights to ttnn with caching.
@@ -113,17 +114,9 @@ class ttMLA:
 
         mem = ttnn.DRAM_MEMORY_CONFIG if device else None
 
-        # 8 ttnn.as_tensor calls
+        # KV-branch weights (always loaded). The kv-only forward path only
+        # needs these; the rest are gated below on `kv_only`.
         result = {
-            "q_a_layernorm": ttnn.as_tensor(
-                q_a_ln,
-                device=device,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.ROW_MAJOR_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
-                cache_file_name=_cache_name("q_a_layernorm"),
-            ),
             "kv_a_layernorm": ttnn.as_tensor(
                 kv_a_ln,
                 device=device,
@@ -132,24 +125,6 @@ class ttMLA:
                 memory_config=mem,
                 mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
                 cache_file_name=_cache_name("kv_a_layernorm"),
-            ),
-            "q_a_proj": ttnn.as_tensor(
-                q_a_proj,
-                device=device,
-                dtype=ttnn.bfloat8_b,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=mapper_tp0,
-                cache_file_name=_cache_name("q_a_proj"),
-            ),
-            "q_b_proj": ttnn.as_tensor(
-                q_b_proj,
-                device=device,
-                dtype=ttnn.bfloat8_b,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=mapper_tp1,
-                cache_file_name=_cache_name("q_b_proj"),
             ),
             "kv_a_proj_with_mqa": ttnn.as_tensor(
                 kv_a_proj,
@@ -160,34 +135,66 @@ class ttMLA:
                 mesh_mapper=mapper_tp0,
                 cache_file_name=_cache_name("kv_a_proj_with_mqa"),
             ),
-            "wkv_b1": ttnn.as_tensor(
-                wkv_b1,
-                device=device,
-                dtype=ttnn.bfloat8_b,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=mapper_tp1,
-                cache_file_name=_cache_name("wkv_b1"),
-            ),
-            "wkv_b2": ttnn.as_tensor(
-                wkv_b2,
-                device=device,
-                dtype=ttnn.bfloat8_b,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=mapper_tp1,
-                cache_file_name=_cache_name("wkv_b2"),
-            ),
-            "o_proj": ttnn.as_tensor(
-                o_proj,
-                device=device,
-                dtype=ttnn.bfloat8_b,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=mem,
-                mesh_mapper=mapper_tp0,
-                cache_file_name=_cache_name("o_proj"),
-            ),
         }
+        if not kv_only:
+            result.update(
+                {
+                    "q_a_layernorm": ttnn.as_tensor(
+                        q_a_ln,
+                        device=device,
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+                        cache_file_name=_cache_name("q_a_layernorm"),
+                    ),
+                    "q_a_proj": ttnn.as_tensor(
+                        q_a_proj,
+                        device=device,
+                        dtype=ttnn.bfloat8_b,
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=mapper_tp0,
+                        cache_file_name=_cache_name("q_a_proj"),
+                    ),
+                    "q_b_proj": ttnn.as_tensor(
+                        q_b_proj,
+                        device=device,
+                        dtype=ttnn.bfloat8_b,
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=mapper_tp1,
+                        cache_file_name=_cache_name("q_b_proj"),
+                    ),
+                    "wkv_b1": ttnn.as_tensor(
+                        wkv_b1,
+                        device=device,
+                        dtype=ttnn.bfloat8_b,
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=mapper_tp1,
+                        cache_file_name=_cache_name("wkv_b1"),
+                    ),
+                    "wkv_b2": ttnn.as_tensor(
+                        wkv_b2,
+                        device=device,
+                        dtype=ttnn.bfloat8_b,
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=mapper_tp1,
+                        cache_file_name=_cache_name("wkv_b2"),
+                    ),
+                    "o_proj": ttnn.as_tensor(
+                        o_proj,
+                        device=device,
+                        dtype=ttnn.bfloat8_b,
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=mem,
+                        mesh_mapper=mapper_tp0,
+                        cache_file_name=_cache_name("o_proj"),
+                    ),
+                }
+            )
 
         if device is None:
             for v in result.values():
@@ -205,10 +212,11 @@ class ttMLA:
         seq_len: int,
         sp_axis: int = 0,
         tp_axis: int = 1,
+        kv_only: bool = False,
     ):
         """Build TTNN cache for MLA weights using device=None (no device copy)."""
         ttMLA._convert_and_cache_weights(
-            state_dict, mesh_device, config, layer_idx, sp_axis, tp_axis, cache_path, device=None
+            state_dict, mesh_device, config, layer_idx, sp_axis, tp_axis, cache_path, device=None, kv_only=kv_only
         )
 
     def __init__(
@@ -223,10 +231,12 @@ class ttMLA:
         is_balanced: bool = False,
         topology=ttnn.Topology.Linear,
         weight_cache_path: Optional[Path] = None,
+        kv_only: bool = False,
     ):
         self.config = config
         self.mesh_device = mesh_device
         self.layer_idx = layer_idx
+        self.kv_only = kv_only
         self.is_balanced = is_balanced
         self.weight_cache_path = weight_cache_path
 
@@ -293,73 +303,77 @@ class ttMLA:
         self.ccl_num_links = 2 if is_blackhole() else 1
         self.ccl_topology = topology
 
-        # ring attention setup
-        persistent_v_shard_dims = [None, None]
-        persistent_v_shard_dims[self.tp_axis] = 1  # TP heads
-        persistent_k_shard_dims = [None, None]
+        # Ring-attention / joint-SDPA setup. Skipped when kv_only, since the
+        # last layer's forward never reaches SDPA.
+        if not kv_only:
+            persistent_v_shard_dims = [None, None]
+            persistent_v_shard_dims[self.tp_axis] = 1  # TP heads
+            persistent_k_shard_dims = [None, None]
 
-        ag_output_shape_k = (1, 1, seq_len, self.kv_lora_rank + self.qk_rope_head_dim)
-        ag_output_shape_v = (1, self.num_heads, seq_len, self.v_head_dim)
+            ag_output_shape_k = (1, 1, seq_len, self.kv_lora_rank + self.qk_rope_head_dim)
+            ag_output_shape_v = (1, self.num_heads, seq_len, self.v_head_dim)
 
-        self.persistent_k_output_buffer = ttnn.from_torch(
-            torch.zeros(ag_output_shape_k),
-            device=self.mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,  # hardcoded for now
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(
-                self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=persistent_k_shard_dims
-            ),
-        )
+            self.persistent_k_output_buffer = ttnn.from_torch(
+                torch.zeros(ag_output_shape_k),
+                device=self.mesh_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat8_b,  # hardcoded for now
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensor2dMesh(
+                    self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=persistent_k_shard_dims
+                ),
+            )
 
-        self.persistent_v_output_buffer = ttnn.from_torch(
-            torch.zeros(ag_output_shape_v),
-            device=self.mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,  # hardcoded for now
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(
-                self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=persistent_v_shard_dims
-            ),
-        )
+            self.persistent_v_output_buffer = ttnn.from_torch(
+                torch.zeros(ag_output_shape_v),
+                device=self.mesh_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat8_b,  # hardcoded for now
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensor2dMesh(
+                    self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=persistent_v_shard_dims
+                ),
+            )
 
-        # Pre-allocate dummy joint tensors for ring_joint_scaled_dot_product_attention (seq_len=0)
-        num_heads_local = self.num_heads // self.tp_factor
-        joint_shard_dims = [None, None]
-        joint_shard_dims[self.tp_axis] = 1  # shard on head dimension
+            # Pre-allocate dummy joint tensors for ring_joint_scaled_dot_product_attention (seq_len=0)
+            num_heads_local = self.num_heads // self.tp_factor
+            joint_shard_dims = [None, None]
+            joint_shard_dims[self.tp_axis] = 1  # shard on head dimension
 
-        self.joint_q = ttnn.from_torch(
-            torch.zeros(1, num_heads_local, 0, self.qk_head_dim),
-            device=self.mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(
-                self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=joint_shard_dims
-            ),
-        )
+            self.joint_q = ttnn.from_torch(
+                torch.zeros(1, num_heads_local, 0, self.qk_head_dim),
+                device=self.mesh_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat8_b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensor2dMesh(
+                    self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=joint_shard_dims
+                ),
+            )
 
-        self.joint_kv = ttnn.from_torch(
-            torch.zeros(1, 1, 0, self.kv_lora_rank + self.qk_rope_head_dim),
-            device=self.mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
-        )
+            self.joint_kv = ttnn.from_torch(
+                torch.zeros(1, 1, 0, self.kv_lora_rank + self.qk_rope_head_dim),
+                device=self.mesh_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat8_b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+            )
 
-        self.joint_v = ttnn.from_torch(
-            torch.zeros(1, num_heads_local, 0, self.v_head_dim),
-            device=self.mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mesh_mapper=ttnn.ShardTensor2dMesh(
-                self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=joint_shard_dims
-            ),
-        )
+            self.joint_v = ttnn.from_torch(
+                torch.zeros(1, num_heads_local, 0, self.v_head_dim),
+                device=self.mesh_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat8_b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ShardTensor2dMesh(
+                    self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=joint_shard_dims
+                ),
+            )
 
-        # Load weights to TT device
+        # Load weights to TT device. In kv_only mode the returned dict only
+        # contains kv_a_layernorm / kv_a_proj_with_mqa; the Q-side / V / wo
+        # weights are skipped entirely (saves DRAM + cache reads).
         weights = self._convert_and_cache_weights(
             state_dict,
             mesh_device,
@@ -369,16 +383,18 @@ class ttMLA:
             tp_axis,
             self.weight_cache_path,
             device=mesh_device,
+            kv_only=kv_only,
         )
-        self.q_a_layernorm_weight = weights["q_a_layernorm"]
         self.kv_a_layernorm_weight = weights["kv_a_layernorm"]
-        self.q_a_proj_weight = weights["q_a_proj"]
-        self.q_b_proj_weight = weights["q_b_proj"]
         self.kv_a_proj_with_mqa_weight = weights["kv_a_proj_with_mqa"]
-        self.wkv_b1_weight = weights["wkv_b1"]
-        self.wkv_b2_weight = weights["wkv_b2"]
-        self.o_proj_weight = weights["o_proj"]
-        logger.info(f"Loaded {len(weights)} weights in MLA layer {layer_idx}")
+        if not kv_only:
+            self.q_a_layernorm_weight = weights["q_a_layernorm"]
+            self.q_a_proj_weight = weights["q_a_proj"]
+            self.q_b_proj_weight = weights["q_b_proj"]
+            self.wkv_b1_weight = weights["wkv_b1"]
+            self.wkv_b2_weight = weights["wkv_b2"]
+            self.o_proj_weight = weights["o_proj"]
+        logger.info(f"Loaded {len(weights)} weights in MLA layer {layer_idx} (kv_only={kv_only})")
 
     @staticmethod
     def kv_cache_to_host(kvpe_cache: ttnn.Tensor, mesh_device: ttnn.MeshDevice, sp_axis: int = 0):
@@ -398,16 +414,22 @@ class ttMLA:
         ).to(torch.bfloat16)
 
     def get_weight_shapes(self) -> dict[str, tuple]:
-        return {
-            "q_a_proj.weight": tuple(self.q_a_proj_weight.shape),
-            "q_a_layernorm.weight": tuple(self.q_a_layernorm_weight.shape),
-            "q_b_proj.weight": tuple(self.q_b_proj_weight.shape),
+        shapes = {
             "kv_a_proj_with_mqa.weight": tuple(self.kv_a_proj_with_mqa_weight.shape),
             "kv_a_layernorm.weight": tuple(self.kv_a_layernorm_weight.shape),
-            "wkv_b1_weight": tuple(self.wkv_b1_weight.shape),
-            "wkv_b2_weight": tuple(self.wkv_b2_weight.shape),
-            "o_proj.weight": tuple(self.o_proj_weight.shape),
         }
+        if not self.kv_only:
+            shapes.update(
+                {
+                    "q_a_proj.weight": tuple(self.q_a_proj_weight.shape),
+                    "q_a_layernorm.weight": tuple(self.q_a_layernorm_weight.shape),
+                    "q_b_proj.weight": tuple(self.q_b_proj_weight.shape),
+                    "wkv_b1_weight": tuple(self.wkv_b1_weight.shape),
+                    "wkv_b2_weight": tuple(self.wkv_b2_weight.shape),
+                    "o_proj.weight": tuple(self.o_proj_weight.shape),
+                }
+            )
+        return shapes
 
     # Default output dtypes per weight, used when no tuned config exists for the seq_len_local
     MM_DEFAULT_DTYPES = {
@@ -511,89 +533,97 @@ class ttMLA:
         num_heads_local = self.num_heads // self.tp_factor
         seq_len_local = hidden_states.shape[2]
 
-        # q_projection
-        tt_q = ttnn.linear(
-            hidden_states,
-            self.q_a_proj_weight,
-            compute_kernel_config=self.default_compute_kernel_config,
-            **self._get_mm_kwargs("q_a_proj", seq_len_local),
-        )
-
-        # All reduce (skip for single-device TP)
-        if self.tp_factor > 1:
-            tt_q = ttnn.experimental.reduce_scatter_minimal_async(
-                tt_q,
-                persistent_output_buffers=None,
-                dim=3,
-                multi_device_global_semaphore=self.tt_ccl.get_and_cycle_rs_semaphore_handles(cluster_axis=self.tp_axis),
-                barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
-                num_links=self.ccl_num_links,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                topology=self.ccl_topology,
-                cluster_axis=self.tp_axis,
-            )
-            tt_q = ttnn.experimental.all_gather_async(
-                tt_q,
-                dim=3,
-                multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(cluster_axis=self.tp_axis),
-                barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
-                num_links=self.ccl_num_links,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                topology=self.ccl_topology,
-                cluster_axis=self.tp_axis,
+        # Q branch is skipped entirely in kv_only mode (last layer just fills
+        # the KV cache for migration). The KV branch + cache fill below run as
+        # usual; SDPA + wo are also skipped at the end of this function.
+        if not self.kv_only:
+            # q_projection
+            tt_q = ttnn.linear(
+                hidden_states,
+                self.q_a_proj_weight,
+                compute_kernel_config=self.default_compute_kernel_config,
+                **self._get_mm_kwargs("q_a_proj", seq_len_local),
             )
 
-        # rmsnorm
-        tt_q = ttnn.rms_norm(
-            tt_q,
-            weight=self.q_a_layernorm_weight,
-            epsilon=self.config.rms_norm_eps,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            compute_kernel_config=self.default_compute_kernel_config,
-        )
-        tt_q = ttnn.linear(
-            tt_q,
-            self.q_b_proj_weight,
-            compute_kernel_config=self.default_compute_kernel_config,
-            **self._get_mm_kwargs("q_b_proj", seq_len_local),
-        )
+            # All reduce (skip for single-device TP)
+            if self.tp_factor > 1:
+                tt_q = ttnn.experimental.reduce_scatter_minimal_async(
+                    tt_q,
+                    persistent_output_buffers=None,
+                    dim=3,
+                    multi_device_global_semaphore=self.tt_ccl.get_and_cycle_rs_semaphore_handles(
+                        cluster_axis=self.tp_axis
+                    ),
+                    barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
+                    num_links=self.ccl_num_links,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    topology=self.ccl_topology,
+                    cluster_axis=self.tp_axis,
+                )
+                tt_q = ttnn.experimental.all_gather_async(
+                    tt_q,
+                    dim=3,
+                    multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(
+                        cluster_axis=self.tp_axis
+                    ),
+                    barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
+                    num_links=self.ccl_num_links,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    topology=self.ccl_topology,
+                    cluster_axis=self.tp_axis,
+                )
 
-        # convert to
-        # [batch (1), num_heads_local, seq_len_local, qk_head_dim]
-        tt_q, _, _ = ttnn.experimental.nlp_create_qkv_heads(
-            tt_q,
-            num_heads=num_heads_local,
-            num_kv_heads=0,
-            transpose_k_heads=False,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+            # rmsnorm
+            tt_q = ttnn.rms_norm(
+                tt_q,
+                weight=self.q_a_layernorm_weight,
+                epsilon=self.config.rms_norm_eps,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.default_compute_kernel_config,
+            )
+            tt_q = ttnn.linear(
+                tt_q,
+                self.q_b_proj_weight,
+                compute_kernel_config=self.default_compute_kernel_config,
+                **self._get_mm_kwargs("q_b_proj", seq_len_local),
+            )
 
-        # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
-        tt_q_nope = ttnn.slice(tt_q, [0, 0, 0, 0], [1, num_heads_local, seq_len_local, self.qk_nope_head_dim])
-        tt_q_rope = ttnn.slice(
-            tt_q, [0, 0, 0, self.qk_nope_head_dim], [1, num_heads_local, seq_len_local, self.qk_head_dim]
-        )
-        ttnn.deallocate(tt_q)
+            # convert to
+            # [batch (1), num_heads_local, seq_len_local, qk_head_dim]
+            tt_q, _, _ = ttnn.experimental.nlp_create_qkv_heads(
+                tt_q,
+                num_heads=num_heads_local,
+                num_kv_heads=0,
+                transpose_k_heads=False,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
 
-        tt_q_nope = ttnn.linear(
-            tt_q_nope,
-            self.wkv_b1_weight,
-            compute_kernel_config=self.default_compute_kernel_config,
-            **self._get_mm_kwargs("wkv_b1", seq_len_local),
-        )
+            # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
+            tt_q_nope = ttnn.slice(tt_q, [0, 0, 0, 0], [1, num_heads_local, seq_len_local, self.qk_nope_head_dim])
+            tt_q_rope = ttnn.slice(
+                tt_q, [0, 0, 0, self.qk_nope_head_dim], [1, num_heads_local, seq_len_local, self.qk_head_dim]
+            )
+            ttnn.deallocate(tt_q)
 
-        tt_q_rope = ttnn.experimental.rotary_embedding_llama(
-            tt_q_rope,
-            rope_tensors["cos_matrix"],
-            rope_tensors["sin_matrix"],
-            rope_tensors["trans_matrix"],
-            is_decode_mode=False,
-        )
+            tt_q_nope = ttnn.linear(
+                tt_q_nope,
+                self.wkv_b1_weight,
+                compute_kernel_config=self.default_compute_kernel_config,
+                **self._get_mm_kwargs("wkv_b1", seq_len_local),
+            )
 
-        # TODO: concat rope and nope, workaround remove with ttnn.narrow or fusion
-        tt_q = ttnn.concat([tt_q_nope, tt_q_rope], dim=-1)
-        ttnn.deallocate(tt_q_nope)
-        ttnn.deallocate(tt_q_rope)
+            tt_q_rope = ttnn.experimental.rotary_embedding_llama(
+                tt_q_rope,
+                rope_tensors["cos_matrix"],
+                rope_tensors["sin_matrix"],
+                rope_tensors["trans_matrix"],
+                is_decode_mode=False,
+            )
+
+            # TODO: concat rope and nope, workaround remove with ttnn.narrow or fusion
+            tt_q = ttnn.concat([tt_q_nope, tt_q_rope], dim=-1)
+            ttnn.deallocate(tt_q_nope)
+            ttnn.deallocate(tt_q_rope)
 
         # kv
         tt_kv = ttnn.linear(
@@ -668,6 +698,12 @@ class ttMLA:
 
         if on_layer_complete is not None:
             on_layer_complete(self.layer_idx)
+
+        # Last layer (kv_only) is done: KV cache filled, migration callback
+        # fired. No SDPA / wo to run; nothing downstream consumes the output.
+        if self.kv_only:
+            signpost(header="MLA_END")
+            return None
 
         tt_v_embedding = ttnn.linear(
             tt_kv_nope,
