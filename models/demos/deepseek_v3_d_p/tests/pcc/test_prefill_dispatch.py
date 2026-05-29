@@ -284,11 +284,11 @@ def test_ttnn_dispatch(
 
     # Forward pass through TTNN dispatch
     tt_expert_offsets = TtDispatchModule.shard_expert_offsets(mesh_device, expert_offsets)
-    tt_end_offsets = TtDispatchModule.shard_expert_offsets(mesh_device, expert_offsets + expert_counter)
+    tt_expert_histograms = TtDispatchModule.shard_expert_offsets(mesh_device, expert_counter)
     tt_expert_dispatch_table = TtDispatchModule.shard_expert_dispatch_table(mesh_device, expert_dispatch_table, sp_axis)
 
     tt_dispatched, tt_metadata = tt_dispatch_module(
-        tt_x, tt_weights, tt_indices, tt_expert_offsets, tt_end_offsets, tt_expert_dispatch_table
+        tt_x, tt_weights, tt_indices, tt_expert_offsets, tt_expert_histograms, tt_expert_dispatch_table
     )
 
     if not run_pcc_check:

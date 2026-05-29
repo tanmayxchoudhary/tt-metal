@@ -91,8 +91,10 @@ class TtDispatchModule(LightweightModule):
             num_untilizers_per_sender: Number of untilizer cores per sender (default 2).
                 With 2 untilizers, u1 reads even batches (0,2,4,...) starting from
                 tt_expert_offsets and increments; u2 reads odd batches (1,3,5,...) starting
-                from tt_end_offsets and decrements. Eliminates synchronization on the
-                offset tensor since the two cores write into non-overlapping halves.
+                from tt_expert_offsets + tt_expert_histograms (computed in L1 from the same
+                two tensors u1 and the routing setup already produce) and decrements.
+                Eliminates synchronization on the offset tensor since the two cores write
+                into non-overlapping halves.
         """
         if fp8_output and "blackhole" not in ttnn.get_arch_name():
             raise ValueError("fp8_output requires Blackhole hardware")
@@ -202,7 +204,7 @@ class TtDispatchModule(LightweightModule):
         weights: ttnn.Tensor,
         indices: ttnn.Tensor,
         tt_expert_offsets: ttnn.Tensor,
-        tt_end_offsets: ttnn.Tensor,
+        tt_expert_histograms: ttnn.Tensor,
         tt_expert_dispatch_table: ttnn.Tensor,
     ):
         """
@@ -224,10 +226,11 @@ class TtDispatchModule(LightweightModule):
             tt_expert_offsets: Starting token index per source device per expert in the
                 destination device's flat dispatch buffer. Produced by TtMoERoutingSetup.forward().
                 Shape per device: (1, num_routed_experts)
-            tt_end_offsets: Exclusive end token index per source device per expert.
-                tt_end_offsets[e] = tt_expert_offsets[e] + expert_histograms[e].
-                Passed to untilizer 1 (right-to-left writer) as its starting write pointer.
-                Shape per device: (1, num_routed_experts)
+            tt_expert_histograms: Per-expert token count from this source device (the same
+                histogram TtMoERoutingSetup.forward() emits). The dispatch kernel's right-to-left
+                untilizer derives its starting (exclusive end) pointer in L1 as
+                tt_expert_offsets[e] + tt_expert_histograms[e].
+                Shape per device: (1, num_routed_experts) or (num_routed_experts,)
             tt_expert_dispatch_table: Maps each expert ID to the destination chip ID within the
                 dispatch group. Produced by shard_expert_dispatch_table().
                 Shape per device: (1, num_routed_experts)
@@ -263,7 +266,7 @@ class TtDispatchModule(LightweightModule):
         logger.debug(f"  weights.shape={weights.shape}")
         logger.debug(f"  indices.shape={indices.shape}")
         logger.debug(f"  tt_expert_offsets.shape={tt_expert_offsets.shape}")
-        logger.debug(f"  tt_end_offsets.shape={tt_end_offsets.shape}")
+        logger.debug(f"  tt_expert_histograms.shape={tt_expert_histograms.shape}")
         logger.debug(f"  tt_expert_dispatch_table.shape={tt_expert_dispatch_table.shape}")
         logger.debug(f"[TtDispatchModule.forward] CONFIG:")
         logger.debug(f"  dispatch_group_size={self.dispatch_group_size}, experts_per_chip={self.experts_per_chip}")
@@ -281,7 +284,7 @@ class TtDispatchModule(LightweightModule):
             weights_tensor=weights,
             indices_tensor=indices,
             expert_offsets_tensor=tt_expert_offsets,
-            expert_end_offsets_tensor=tt_end_offsets,
+            expert_histograms_tensor=tt_expert_histograms,
             expert_dispatch_table_tensor=tt_expert_dispatch_table,
             dispatch_group_size=self.dispatch_group_size,
             experts_per_chip=self.experts_per_chip,

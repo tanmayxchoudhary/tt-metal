@@ -8,15 +8,18 @@
 // Each sender owns 2 untilize cores (u1, u2). Both share the same expert subset
 // (filtered via dispatch_core_idx & core_mask) but split work by:
 //   * batches:  u1 (core_id=0) takes even batches, u2 (core_id=1) takes odd.
-//   * offsets:  u1 loads tt_expert_offsets and increments from start (left→right),
-//               u2 loads tt_end_offsets    and decrements from end  (right→left).
+//   * offsets:  u1 starts at tt_expert_offsets[e] and increments left→right;
+//               u2 starts at tt_expert_offsets[e] + expert_histograms[e] and
+//               decrements right→left. u2 derives its starting pointer in L1
+//               (offsets[e] += histograms[e]) instead of consuming a pre-summed
+//               tt_end_offsets tensor — saves an op + tensor on the host side.
 // Each core keeps its own L1 copy of offsets[]; they never collide because they
 // grow page_idx from opposite ends of each expert's token range — so no cross-
 // core synchronization is needed on the offsets[] array.
 //
-// At startup: read the full per-expert offsets tensor (tt_expert_offsets for u1,
-// tt_end_offsets for u2) plus the expert dispatch_table[] tensor from DRAM into
-// local L1 scratch (c_3, c_9).
+// At startup: both cores load tt_expert_offsets[] into the lower half of c_3 and
+// the expert dispatch_table[] into c_9. u2 additionally loads expert_histograms[]
+// into the upper half of c_3 (scratch) and folds it into offsets[] in place.
 //
 // Per batch:
 //   1. Signal compute to untilize this batch.
@@ -117,7 +120,7 @@ void kernel_main() {
     constexpr auto weights_args = TensorAccessorArgs<indices_args.next_compile_time_args_offset()>();
     constexpr auto offsets_args = TensorAccessorArgs<weights_args.next_compile_time_args_offset()>();
     constexpr auto dispatch_table_args = TensorAccessorArgs<offsets_args.next_compile_time_args_offset()>();
-    constexpr auto end_offsets_args = TensorAccessorArgs<dispatch_table_args.next_compile_time_args_offset()>();
+    constexpr auto histograms_args = TensorAccessorArgs<dispatch_table_args.next_compile_time_args_offset()>();
 
     constexpr uint32_t tiles_per_row = hidden_size / 32;
     constexpr uint32_t block_ct_dim = 8;
@@ -141,7 +144,7 @@ void kernel_main() {
     uint32_t indices_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t weights_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t offsets_tensor_address = get_arg_val<uint32_t>(rt_idx++);
-    uint32_t end_offsets_tensor_address = get_arg_val<uint32_t>(rt_idx++);
+    uint32_t histograms_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t dispatch_table_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t token_start_idx = get_arg_val<uint32_t>(rt_idx++);
     uint32_t token_end_idx = get_arg_val<uint32_t>(rt_idx++);
@@ -153,18 +156,20 @@ void kernel_main() {
     const auto dispatch_table_addr_gen = TensorAccessor(dispatch_table_args, dispatch_table_tensor_address);
 
     // ===== Startup: load offsets[] and dispatch_table[] into local L1 =====
-    // u1 loads tt_expert_offsets (start, increments left-to-right).
-    // u2 loads tt_end_offsets    (end,   decrements right-to-left).
+    // Both u1 and u2 load tt_expert_offsets[] into the lower half of cb_offsets.
+    // u2 additionally loads expert_histograms[] into the upper half (scratch) and
+    // folds it into offsets[] so its counters start at offset[e] + histogram[e] and
+    // decrement right-to-left.
     cb_reserve_back(cb_offsets_id, offsets_pages);
     uint32_t offsets_base_addr = get_write_ptr(cb_offsets_id);
+    for (uint32_t i = 0; i < offsets_pages; i++) {
+        noc_async_read_page(i, offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
+    }
+    uint32_t histograms_base_addr = offsets_base_addr + offsets_pages * aligned_offsets_page_size;
     if constexpr (IS_RIGHT_UNTILIZER) {
-        const auto end_offsets_addr_gen = TensorAccessor(end_offsets_args, end_offsets_tensor_address);
+        const auto histograms_addr_gen = TensorAccessor(histograms_args, histograms_tensor_address);
         for (uint32_t i = 0; i < offsets_pages; i++) {
-            noc_async_read_page(i, end_offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
-        }
-    } else {
-        for (uint32_t i = 0; i < offsets_pages; i++) {
-            noc_async_read_page(i, offsets_addr_gen, offsets_base_addr + i * aligned_offsets_page_size);
+            noc_async_read_page(i, histograms_addr_gen, histograms_base_addr + i * aligned_offsets_page_size);
         }
     }
     cb_reserve_back(cb_dispatch_table_id, dispatch_table_pages);
@@ -175,6 +180,12 @@ void kernel_main() {
     }
     noc_async_read_barrier();
     tt_l1_ptr uint32_t* offsets = reinterpret_cast<tt_l1_ptr uint32_t*>(offsets_base_addr);
+    if constexpr (IS_RIGHT_UNTILIZER) {
+        tt_l1_ptr uint32_t* histograms = reinterpret_cast<tt_l1_ptr uint32_t*>(histograms_base_addr);
+        for (uint32_t e = 0; e < n_routed_experts; e++) {
+            offsets[e] += histograms[e];
+        }
+    }
     tt_l1_ptr int32_t* expert_dispatch_table = reinterpret_cast<tt_l1_ptr int32_t*>(dispatch_table_base_addr);
 
     // ===== Indices / weights scratch (overwritten per batch, single page slot used) =====

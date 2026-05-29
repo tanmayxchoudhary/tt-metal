@@ -47,10 +47,11 @@ void bind_dispatch(nb::module_& mod) {
                 expert in the destination device's flat dispatch buffer. Consumed by u1
                 (left-to-right, increments).
                 Shape per device: (1, num_routed_experts).
-            expert_end_offsets_tensor (ttnn.Tensor): End (exclusive) token index per source
-                device per expert. Consumed by u2 (right-to-left, decrements). u1 and u2
-                grow page_idx from opposite ends of each expert's token range.
-                Shape per device: (1, num_routed_experts).
+            expert_histograms_tensor (ttnn.Tensor): Per-expert token count from this source
+                device. u2 (the right-to-left untilizer) computes its starting (exclusive end)
+                write pointer in L1 as expert_offsets_tensor[e] + expert_histograms_tensor[e],
+                so u1 and u2 grow page_idx from opposite ends of each expert's token range.
+                Shape per device: (1, num_routed_experts) or (num_routed_experts,).
             expert_dispatch_table_tensor (ttnn.Tensor): Maps each expert ID to the destination
                 chip ID within the dispatch group. Values >= 0 are destination chip IDs; -1
                 means the expert is absent from this dispatch group.
@@ -81,8 +82,9 @@ void bind_dispatch(nb::module_& mod) {
                 Wormhole_B0. Defaults to False.
             num_untilizers_per_sender (int, optional): Number of untilize cores per
                 sender on the tile-layout path. Currently only 2 is supported (u1 reads
-                from expert_offsets_tensor incrementing, u2 from expert_end_offsets_tensor
-                decrementing). Defaults to 2.
+                expert_offsets_tensor incrementing, u2 reads expert_offsets_tensor and
+                expert_histograms_tensor and writes decrementing from offsets+histograms).
+                Defaults to 2.
 
         Returns:
             Tuple[ttnn.Tensor, ttnn.Tensor]:
@@ -98,7 +100,7 @@ void bind_dispatch(nb::module_& mod) {
         nb::arg("weights_tensor").noconvert(),
         nb::arg("indices_tensor").noconvert(),
         nb::arg("expert_offsets_tensor").noconvert(),
-        nb::arg("expert_end_offsets_tensor").noconvert(),
+        nb::arg("expert_histograms_tensor").noconvert(),
         nb::arg("expert_dispatch_table_tensor").noconvert(),
         nb::kw_only(),
         nb::arg("dispatch_group_size"),

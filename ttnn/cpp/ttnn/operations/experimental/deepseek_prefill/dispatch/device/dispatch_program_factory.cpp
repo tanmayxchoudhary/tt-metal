@@ -107,7 +107,7 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
     auto indices_tensor = tensor_args.indices_tensor;
     auto weights_tensor = tensor_args.weights_tensor;
     auto offsets_tensor = tensor_args.expert_offsets_tensor;
-    auto end_offsets_tensor = tensor_args.expert_end_offsets_tensor;
+    auto histograms_tensor = tensor_args.expert_histograms_tensor;
     auto dispatch_table_tensor = tensor_args.expert_dispatch_table_tensor;
 
     const auto& output_tensor = tensor_return_value.at(0);
@@ -297,12 +297,15 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         /*buffering_factor=*/read_batch_size,
         /*cb_id=*/tt::CBIndex::c_2,
         "untilize_weights_scratch");
-    // c_3: offsets (full tensor, loaded once at startup, mutated in place per batch)
+    // c_3: offsets (full tensor, loaded once at startup, mutated in place per batch).
+    // Sized for 2× num_pages: the lower half holds expert_offsets[] (consumed by both u1 and
+    // u2); the upper half is u2-only scratch where the histograms tensor is staged so u2 can
+    // compute its right-to-left starting pointers as expert_offsets[e] + histogram[e] in L1.
     detail::create_tensor_cb(
         desc,
         untilize_core_grid,
         offsets_tensor,
-        /*buffering_factor=*/detail::get_num_pages(offsets_tensor),
+        /*buffering_factor=*/2 * detail::get_num_pages(offsets_tensor),
         /*cb_id=*/tt::CBIndex::c_3,
         "untilize_offsets_tensor");
     // c_9: dispatch_table (full tensor, loaded once at startup)
@@ -663,8 +666,9 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         tt::tt_metal::TensorAccessorArgs(weights_tensor.buffer()).append_to(untilize_reader_compile_args);
         tt::tt_metal::TensorAccessorArgs(offsets_tensor.buffer()).append_to(untilize_reader_compile_args);
         tt::tt_metal::TensorAccessorArgs(dispatch_table_tensor.buffer()).append_to(untilize_reader_compile_args);
-        // end_offsets_args: u2 (core_id=1) uses tt_end_offsets instead of tt_expert_offsets.
-        tt::tt_metal::TensorAccessorArgs(end_offsets_tensor.buffer()).append_to(untilize_reader_compile_args);
+        // histograms_args: u2 (core_id=1) additionally loads expert_histograms[] and computes
+        // its end-of-region pointers in L1 as expert_offsets[e] + expert_histograms[e].
+        tt::tt_metal::TensorAccessorArgs(histograms_tensor.buffer()).append_to(untilize_reader_compile_args);
 
         // ===== Writer compile args =====
         std::vector<uint32_t> untilize_writer_compile_args = {
@@ -881,9 +885,10 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         untilize_reader_rt_args.push_back(indices_tensor.buffer());
         untilize_reader_rt_args.push_back(weights_tensor.buffer());
         untilize_reader_rt_args.push_back(offsets_tensor.buffer());
-        // end_offsets_tensor is always passed (consumed unconditionally by rt_idx++);
-        // u1 reads it but ignores it; u2 uses it to load tt_end_offsets.
-        untilize_reader_rt_args.push_back(end_offsets_tensor.buffer());
+        // histograms_tensor is always passed (consumed unconditionally by rt_idx++);
+        // u1 reads the address but ignores it; u2 uses it to load expert_histograms[] and
+        // compute its end-of-region pointers in L1.
+        untilize_reader_rt_args.push_back(histograms_tensor.buffer());
         untilize_reader_rt_args.push_back(dispatch_table_tensor.buffer());
         untilize_reader_rt_args.push_back(0u);                           // token_start_idx
         untilize_reader_rt_args.push_back((uint32_t)tokens_per_device);  // token_end_idx
