@@ -5,6 +5,7 @@
 
 #include <tuple>
 
+#include "tt_metal/fabric/hw/inc/fabric_routing_mode.h"
 #include "tt_metal/fabric/hw/inc/tt_fabric_api.h"
 #include "tt_metal/fabric/hw/inc/linear/api.h"
 #include "tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp"
@@ -902,6 +903,16 @@ inline void send_init_semaphore_to_configured_targets(
         if (device_idx == LinearizedSrcMeshCoord) {
             continue;
         } else if (is_configured_target<LinearizedSrcMeshCoord, MeshRows, MeshCols, Axis>(device_idx)) {
+            // FABRIC_2D: the _1d helper type-puns the packet header to LowLatencyPacketHeader*,
+            // but under FABRIC_2D PACKET_HEADER_TYPE is HybridMeshPacketHeader — different layout.
+            // Force the 2D variant when FABRIC_2D is active, regardless of CCL Topology
+            // (Topology::Linear is the data-flow semantics; fabric mode is the hardware reality).
+#if defined(ROUTING_MODE) && ((ROUTING_MODE & ROUTING_MODE_2D) != 0)
+            const auto& dest_chip_id = dest_chip_ids[device_idx];
+            const auto& dest_mesh_id = dest_mesh_ids[device_idx];
+            fabric_send_chip_unicast_noc_unicast_semaphore_only<SrcChipId, MeshRows, MeshCols>(
+                fabric_connections, packet_header, dest_chip_id, dest_mesh_id, init_noc_semaphore_addr, 1, flush);
+#else
             if constexpr (is_1d_topology<Topology>()) {
                 fabric_send_chip_unicast_noc_unicast_semaphore_only_1d<
                     LinearizedSrcMeshCoord,
@@ -914,6 +925,7 @@ inline void send_init_semaphore_to_configured_targets(
                 fabric_send_chip_unicast_noc_unicast_semaphore_only<SrcChipId, MeshRows, MeshCols>(
                     fabric_connections, packet_header, dest_chip_id, dest_mesh_id, init_noc_semaphore_addr, 1, flush);
             }
+#endif
         }
     }
 }

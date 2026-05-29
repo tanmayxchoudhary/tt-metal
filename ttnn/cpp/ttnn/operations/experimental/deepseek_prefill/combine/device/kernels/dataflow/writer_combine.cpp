@@ -6,9 +6,17 @@
 #include "api/dataflow/dataflow_api.h"
 #include "api/debug/assert.h"
 #include "api/debug/dprint.h"
+#include "tt_metal/fabric/hw/inc/fabric_routing_mode.h"
 #include "tt_metal/fabric/hw/inc/tt_fabric_api.h"
 #include "tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp"
 #include "ttnn/operations/ccl/common/kernels/moe_utils.hpp"
+
+// FABRIC_2D: see DISPATCH_FABRIC_2D in writer_dispatch.cpp for rationale.
+#if defined(ROUTING_MODE) && ((ROUTING_MODE & ROUTING_MODE_2D) != 0)
+#define COMBINE_FABRIC_2D 1
+#else
+#define COMBINE_FABRIC_2D 0
+#endif
 
 #define ENABLE_COMBINE_DEBUG 0
 #if ENABLE_COMBINE_DEBUG
@@ -206,6 +214,8 @@ void kernel_main() {
         }
         uint32_t distance = route_info[1];
         uint32_t output_page_idx = route_info[2];
+        // FABRIC_2D: reader stashes dst_chip here so we can index dest_chip_ids/dest_mesh_ids.
+        uint32_t dst_chip_device_id = route_info[3];
         cb_pop_front(cb_route_info_id, 1);
 
         cb_wait_front(cb_output_for_writer_id, 1);
@@ -214,10 +224,19 @@ void kernel_main() {
         DPRINT_COMBINE("Fabric send: route={} distance={} page_idx={}\n", route, distance, output_page_idx);
 
 #ifdef DEST_CHIP_ID
+        // FABRIC_2D: recompute EDM direction from the destination — see note in writer_dispatch.cpp.
+#if COMBINE_FABRIC_2D
+        const uint32_t fabric_route = static_cast<uint32_t>(
+            get_next_hop_router_direction(dest_mesh_ids[dst_chip_device_id], dest_chip_ids[dst_chip_device_id]));
+        fabric_set_unicast_route<false>(
+            unicast_packet_header, dest_chip_ids[dst_chip_device_id], dest_mesh_ids[dst_chip_device_id]);
+#else
+        const uint32_t fabric_route = route;
         fabric_set_unicast_route<false>((volatile tt_l1_ptr LowLatencyPacketHeader*)unicast_packet_header, distance);
+#endif
         fabric_send_noc_unicast<fabric_max_packet_size>(
             output_addr_gen,
-            fabric_connections[route],
+            fabric_connections[fabric_route],
             unicast_packet_header,
             output_data_addr,
             output_page_idx,

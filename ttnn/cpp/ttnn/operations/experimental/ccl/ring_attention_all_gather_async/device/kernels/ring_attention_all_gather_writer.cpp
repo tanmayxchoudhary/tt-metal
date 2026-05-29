@@ -4,6 +4,7 @@
 
 #include "api/dataflow/dataflow_api.h"
 #include "tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp"
+#include "tt_metal/fabric/hw/inc/fabric_routing_mode.h"
 #include "tt_metal/fabric/hw/inc/noc_addr.h"
 #include "tt_metal/fabric/hw/inc/tt_fabric_api.h"
 #include "cpp/ttnn/operations/ccl/kernel_common/worker_sync_utils.hpp"
@@ -11,6 +12,20 @@
 #include "cpp/ttnn/operations/ccl/common/kernels/minimal_ccl_common.hpp"
 #include <cstdint>
 #include <utility>
+
+// FABRIC_2D vs 1D switch:
+// Under FABRIC_2D the kernel-injected ROUTING_MODE define contains ROUTING_MODE_2D
+// (see `tt_metal/fabric/fabric_context.cpp:compute_routing_mode` and `tt_metal.cpp:1251`
+// where CreateKernel injects these defines). The 1D `fabric_set_unicast_route(hdr, 1)`
+// form means "1 hop" via the LowLatencyPacketHeader overload; under 2D the same call
+// resolves to a HybridMeshPacketHeader overload that interprets `1` as literal dst_dev_id
+// with dst_mesh_id defaulting to MAX_NUM_MESHES — wrong. Use the 3-arg form with explicit
+// dst_chip_id + dst_mesh_id (passed in as runtime args from the program factory) under 2D.
+#if defined(ROUTING_MODE) && ((ROUTING_MODE & ROUTING_MODE_2D) != 0)
+#define RING_AG_FABRIC_2D 1
+#else
+#define RING_AG_FABRIC_2D 0
+#endif
 
 using address_t = uint32_t;
 using ttnn::ccl::Topology;
@@ -71,6 +86,11 @@ void kernel_main() {
     auto output_addrgens = make_abstract_tensor_accessor_wrappers(outputs_tuple);
     size_t arg_for_fab = arg_idx;
     auto fabric_connection = FabricConnectionManager::build_from_args(arg_for_fab);
+    // FABRIC_2D: destination chip+mesh for this writer's fabric direction. Pushed by
+    // the program factory unconditionally (both under 1D and 2D) — under 1D the kernel
+    // ignores these. See program_factory writer_{forward,backward}_extra_args.
+    const uint16_t fabric_dst_chip_id = static_cast<uint16_t>(get_arg_val<uint32_t>(arg_for_fab++));
+    const uint16_t fabric_dst_mesh_id = static_cast<uint16_t>(get_arg_val<uint32_t>(arg_for_fab++));
     /* Args for overlapped all gather */
     OpSignaler op_signaler_sender;
 
@@ -89,7 +109,11 @@ void kernel_main() {
 
     // pre-populate packet headers
     volatile PACKET_HEADER_TYPE* pkt_hdr = reinterpret_cast<volatile PACKET_HEADER_TYPE*>(packet_header_buffer_addr);
+#if RING_AG_FABRIC_2D
+    fabric_set_unicast_route<false>(pkt_hdr, fabric_dst_chip_id, fabric_dst_mesh_id);
+#else
     fabric_set_unicast_route<false>(pkt_hdr, 1);
+#endif
 
     fabric_connection.open();
 
@@ -207,7 +231,11 @@ void kernel_main() {
     // Write the unicast packet
     if constexpr (num_targets_in_direction) {
         fabric_direction_connection->wait_for_empty_write_slot();
+#if RING_AG_FABRIC_2D
+        fabric_set_unicast_route<false>(pkt_hdr_sem_inc, fabric_dst_chip_id, fabric_dst_mesh_id);
+#else
         fabric_set_unicast_route<false>(pkt_hdr_sem_inc, 1);
+#endif
         fabric_direction_connection->send_payload_flush_blocking_from_address(
             packet_header_buffer_seminc, sizeof(PACKET_HEADER_TYPE));
     }
@@ -316,7 +344,11 @@ void kernel_main() {
 
         // 2. unicast output ready semaphore forward
         fabric_direction_connection->wait_for_empty_write_slot();
+#if RING_AG_FABRIC_2D
+        fabric_set_unicast_route<false>(pkt_hdr_sem_inc, fabric_dst_chip_id, fabric_dst_mesh_id);
+#else
         fabric_set_unicast_route<false>(pkt_hdr_sem_inc, 1);
+#endif
         fabric_direction_connection->send_payload_flush_blocking_from_address(
             packet_header_buffer_seminc, sizeof(PACKET_HEADER_TYPE));
 

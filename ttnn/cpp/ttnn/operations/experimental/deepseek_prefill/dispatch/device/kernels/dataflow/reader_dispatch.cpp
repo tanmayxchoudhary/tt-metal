@@ -505,7 +505,9 @@ void kernel_main() {
                         route_info[0] = route;
                         route_info[1] = distance;
                         route_info[2] = page_idx;
-                        route_info[3] = 0;
+                        // FABRIC_2D: writer looks up dest_chip_ids[expert_chip]/dest_mesh_ids[expert_chip].
+                        // Under 1D this slot is ignored.
+                        route_info[3] = expert_chip;
                         cb_push_back(cb_route_info_id, 1);
 
                         cb_reserve_back(cb_payload_for_writer_id, 1);
