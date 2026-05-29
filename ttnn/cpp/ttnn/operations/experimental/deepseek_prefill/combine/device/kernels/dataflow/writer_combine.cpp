@@ -11,7 +11,12 @@
 #include "tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp"
 #include "ttnn/operations/ccl/common/kernels/moe_utils.hpp"
 
-// FABRIC_2D: see DISPATCH_FABRIC_2D in writer_dispatch.cpp for rationale.
+// FABRIC_2D: under 2D fabric the 1-arg fabric_set_unicast_route<false>(hdr, distance) form
+// resolves to a HybridMeshPacketHeader overload that interprets `distance` as a literal
+// dst_dev_id and uses an invalid dst_mesh_id default. Switch to the 3-arg form with explicit
+// dest_chip_ids[dst_chip] / dest_mesh_ids[dst_chip] (populated by the program factory via the
+// DEST_CHIP_ID / DEST_MESH_ID kernel defines). Same pattern as writer_dispatch.cpp and the
+// ring AG fix in ring_attention_all_gather_writer.cpp; macro name is per-translation-unit.
 #if defined(ROUTING_MODE) && ((ROUTING_MODE & ROUTING_MODE_2D) != 0)
 #define COMBINE_FABRIC_2D 1
 #else
@@ -214,8 +219,11 @@ void kernel_main() {
         }
         uint32_t distance = route_info[1];
         uint32_t output_page_idx = route_info[2];
+#if COMBINE_FABRIC_2D
         // FABRIC_2D: reader stashes dst_chip here so we can index dest_chip_ids/dest_mesh_ids.
+        // Read before cb_pop_front since route_info becomes invalid afterward.
         uint32_t dst_chip_device_id = route_info[3];
+#endif
         cb_pop_front(cb_route_info_id, 1);
 
         cb_wait_front(cb_output_for_writer_id, 1);

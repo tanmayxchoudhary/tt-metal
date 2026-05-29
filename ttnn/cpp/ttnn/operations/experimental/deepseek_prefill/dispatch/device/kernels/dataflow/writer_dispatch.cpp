@@ -194,8 +194,11 @@ void kernel_main() {
         }
         uint32_t distance = route_info[1];
         uint32_t page_idx = route_info[2];
+#if DISPATCH_FABRIC_2D
         // FABRIC_2D: reader stashes expert_chip here so we can index dest_chip_ids/dest_mesh_ids.
+        // Read before cb_pop_front since route_info becomes invalid afterward.
         uint32_t dst_chip_device_id = route_info[3];
+#endif
         cb_pop_front(cb_route_info_id, 1);
 
         cb_wait_front(cb_payload_for_writer_id, 1);

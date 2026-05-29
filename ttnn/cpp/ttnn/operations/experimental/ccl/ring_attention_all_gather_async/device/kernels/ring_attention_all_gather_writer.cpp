@@ -15,12 +15,15 @@
 
 // FABRIC_2D vs 1D switch:
 // Under FABRIC_2D the kernel-injected ROUTING_MODE define contains ROUTING_MODE_2D
-// (see `tt_metal/fabric/fabric_context.cpp:compute_routing_mode` and `tt_metal.cpp:1251`
-// where CreateKernel injects these defines). The 1D `fabric_set_unicast_route(hdr, 1)`
-// form means "1 hop" via the LowLatencyPacketHeader overload; under 2D the same call
-// resolves to a HybridMeshPacketHeader overload that interprets `1` as literal dst_dev_id
-// with dst_mesh_id defaulting to MAX_NUM_MESHES — wrong. Use the 3-arg form with explicit
-// dst_chip_id + dst_mesh_id (passed in as runtime args from the program factory) under 2D.
+// (see `tt_metal/fabric/fabric_context.cpp:compute_routing_mode`, fed in via
+// `CreateKernel`'s defines map in `tt_metal/impl/host_api/tt_metal.cpp`).
+// The 1D `fabric_set_unicast_route<false>(hdr, 1)` form means "1 hop" via the
+// LowLatencyPacketHeader overload (template `<target_as_dev=false>` selects the by-hops
+// decoder). Under 2D the same call resolves to the HybridMeshPacketHeader overload, which
+// interprets `1` as literal dst_dev_id with dst_mesh_id defaulting to MAX_NUM_MESHES — wrong.
+// Use the 3-arg form with explicit dst_chip_id + dst_mesh_id (passed in as runtime args
+// from the program factory) under 2D. Same pattern as writer_dispatch.cpp / writer_combine.cpp;
+// macro name is per-translation-unit.
 #if defined(ROUTING_MODE) && ((ROUTING_MODE & ROUTING_MODE_2D) != 0)
 #define RING_AG_FABRIC_2D 1
 #else
@@ -107,13 +110,22 @@ void kernel_main() {
     auto packet_header_buffer_seminc = get_write_ptr(reserved_packet_header_cb_id);
     cb_push_back(reserved_packet_header_cb_id, 1);
 
-    // pre-populate packet headers
+    // pre-populate packet headers — only meaningful when this writer actually sends in
+    // its direction. On terminal chips num_targets_in_direction (==
+    // direction==1 ? num_targets_backward_direction : num_targets_forward_direction) is 0
+    // and the program factory pushes fabric_dst_{chip,mesh}_id=0; pre-populating with those
+    // would corrupt the header with (chip 0, mesh 0). Guard so the route is set only when
+    // there is at least one downstream target.
     volatile PACKET_HEADER_TYPE* pkt_hdr = reinterpret_cast<volatile PACKET_HEADER_TYPE*>(packet_header_buffer_addr);
+    constexpr uint32_t num_targets_in_direction =
+        direction == 1 ? num_targets_backward_direction : num_targets_forward_direction;
+    if constexpr (num_targets_in_direction > 0) {
 #if RING_AG_FABRIC_2D
-    fabric_set_unicast_route<false>(pkt_hdr, fabric_dst_chip_id, fabric_dst_mesh_id);
+        fabric_set_unicast_route<false>(pkt_hdr, fabric_dst_chip_id, fabric_dst_mesh_id);
 #else
-    fabric_set_unicast_route<false>(pkt_hdr, 1);
+        fabric_set_unicast_route<false>(pkt_hdr, 1);
 #endif
+    }
 
     fabric_connection.open();
 
@@ -121,8 +133,7 @@ void kernel_main() {
         fabric_connection.is_logically_connected() ? (direction == 1 ? &fabric_connection.get_backward_connection()
                                                                      : &fabric_connection.get_forward_connection())
                                                    : nullptr;
-    constexpr uint32_t num_targets_in_direction =
-        direction == 1 ? num_targets_backward_direction : num_targets_forward_direction;
+    // num_targets_in_direction was declared above (next to the pkt_hdr pre-population guard).
 
     uint32_t slice_writes = 0;
 
