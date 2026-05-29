@@ -148,7 +148,9 @@ bfloat16 sfpu_binary_function(const std::string& op_name, const bfloat16& lhs, c
 bfloat16 sfpu_ternary_function(
     const std::string& op_name, const bfloat16& in0, const bfloat16& in1, const bfloat16& in2) {
     if (op_name == "where") {
-        return (static_cast<float>(in0) == 0.0f) ? in2 : in1;
+        // Condition selects in1 when "true"; treat a near-zero condition as "false".
+        constexpr float condition_epsilon = 1e-3f;
+        return (std::fabs(static_cast<float>(in0)) < condition_epsilon) ? in2 : in1;
     }
     TT_THROW("Unsupported ternary op_name in test");
 }
