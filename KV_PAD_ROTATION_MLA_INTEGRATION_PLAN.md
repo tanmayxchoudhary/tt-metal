@@ -16,9 +16,9 @@ into the MLA integration branch after validation.
 | Phase 0 — Branch setup (op branch off main) | **Done** — on `ipotkonjak/kv_cache_per_chip_offset`, 3 commits |
 | Phase 1 — New op `update_padded_kv_cache` under `experimental/deepseek_prefill/` | **Done** — 32/32 tests passing (5 math + 10 torch + 17 device on 2x2 + 2x4) |
 | Phase 1.5 — Tracy perf comparison vs legacy `fill_cache_for_user_` | **Done on bh-qbae-07 (2x2)** — new op 14.5 µs/chip avg vs baseline 15.3 µs (~5% faster, within run-to-run noise). |
-| Phase 2 — MLA integration on `chunked_attn_mla_rotation` | **Unblocked — ready to start** |
-| Phase 3 — MLA chunked-rotated test | Not started |
-| Phase 4 — Regression sweep | Not started |
+| Phase 2 — MLA integration on `chunked_attn_mla_rotation` | **Done** — `mla.py` rotated branch wired (`update_padded_kv_cache` + SDPA with `kv_actual_isl` + `logical_n = kv_actual_isl + chunk_size_global`); non-rotated path unchanged. `rope.py:get_rope_tensors_rotated` added for per-chip rotated cos/sin. |
+| Phase 3 — MLA chunked-rotated test | **Done** — `test_mla_chunked_prefill_rotated_aligned` (chunk-aligned wiring) and `test_mla_chunked_prefill_rotated_partial` (true rotation, iter 0 partial + iter 1 boundary-at-chip-1). Iter 1 un-rotated output PCC 0.997 vs natural-order reference. |
+| Phase 4 — Regression sweep | **Done** — 37 passed / 1 pre-existing q320 L1 OOM / 5 correctly skipped. No regressions. |
 
 ### Final op shape
 
