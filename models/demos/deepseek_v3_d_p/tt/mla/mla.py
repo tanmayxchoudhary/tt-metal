@@ -554,6 +554,7 @@ class ttMLA:
         num_cache_layers: Optional[int] = None,
         chunked_q_chunk_size: int = 32,
         chunked_k_chunk_size: int = 32,
+        kv_actual_isl: Optional[int] = None,
     ) -> ttnn.Tensor:
         signpost(header="MLA_START")
         num_heads_local = self.num_heads // self.tp_factor
@@ -705,7 +706,7 @@ class ttMLA:
         ttnn.deallocate(tt_kv_rope)
         tt_kvpe = ttnn.typecast(tt_kvpe, dtype=ttnn.bfloat8_b)
 
-        if chunk_start_global is None:
+        if chunk_start_global is None and kv_actual_isl is None:
             # Single-shot prefill: fill whole local slot, run on-device ring SDPA.
 
             # Zero the padding region of THIS layer's slot before fill so migration
@@ -776,19 +777,43 @@ class ttMLA:
             assert on_layer_complete is None, "on_layer_complete not yet supported in chunked prefill"
 
             chunk_size_global = seq_len_local * self.sp_factor
-            chunk_end_global = chunk_start_global + chunk_size_global
             tile_size = ttnn.TILE_SIZE
-            assert (
-                chunk_start_global % (tile_size * self.sp_factor) == 0
-                and chunk_size_global % (tile_size * self.sp_factor) == 0
-            ), (
-                f"chunk_start_global ({chunk_start_global}) and chunk_size_global "
-                f"({chunk_size_global}) must be multiples of TILE_SIZE * sp_factor "
-                f"({tile_size * self.sp_factor})"
+            assert chunk_size_global % (tile_size * self.sp_factor) == 0, (
+                f"chunk_size_global ({chunk_size_global}) must be a multiple of "
+                f"TILE_SIZE * sp_factor ({tile_size * self.sp_factor})"
             )
 
-            local_offset = chunk_start_global // self.sp_factor
-            ttnn.kv_cache.fill_cache_for_user_(kvpe_cache, tt_kvpe, cache_batch_idx, update_idx=local_offset)
+            if kv_actual_isl is None:
+                # Non-rotated chunked path: chunk_start_global identifies the
+                # natural cache slot; all chips write at the same local offset.
+                assert chunk_start_global is not None
+                assert chunk_start_global % (tile_size * self.sp_factor) == 0, (
+                    f"chunk_start_global ({chunk_start_global}) must be a multiple of "
+                    f"TILE_SIZE * sp_factor ({tile_size * self.sp_factor})"
+                )
+                chunk_end_global = chunk_start_global + chunk_size_global
+                local_offset = chunk_start_global // self.sp_factor
+                ttnn.kv_cache.fill_cache_for_user_(kvpe_cache, tt_kvpe, cache_batch_idx, update_idx=local_offset)
+                sdpa_logical_n = chunk_end_global
+                sdpa_rotation_kwargs = {}
+            else:
+                # Rotated chunked path: per-chip cache offsets derived from
+                # kv_actual_isl. New tokens overwrite trailing OLD-slab pad cells
+                # before spilling into the NEW slab; tt_kvpe must already be in
+                # server-rotated per-chip order (rotation handled upstream).
+                assert kv_actual_isl % tile_size == 0, f"kv_actual_isl ({kv_actual_isl}) must be tile-aligned"
+                _num_layers_for_op = num_cache_layers if num_cache_layers is not None else 1
+                ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+                    kvpe_cache,
+                    tt_kvpe,
+                    slot_idx=cache_user_id,
+                    layer_idx=cache_layer_idx,
+                    num_layers=_num_layers_for_op,
+                    kv_actual_global=kv_actual_isl,
+                    cluster_axis=self.sp_axis,
+                )
+                sdpa_logical_n = kv_actual_isl + chunk_size_global
+                sdpa_rotation_kwargs = {"kv_actual_isl": kv_actual_isl}
 
             # K: pass kvpe_cache directly + cache_batch_idx (no slice). The op
             # derives q_start_idx from logical_n (= chunk_end_global), so the
@@ -808,7 +833,7 @@ class ttMLA:
                 persistent_output_buffer_k=self.chunked_persistent_k_buf,
                 persistent_output_buffer_v=self.chunked_persistent_v_buf,
                 joint_strategy="rear",
-                logical_n=chunk_end_global,
+                logical_n=sdpa_logical_n,
                 # SDPA chunk sizes are caller-tunable. The L1 budget is driven by
                 # Sk_chunk_t * DHt and Sk_chunk_t * vDHt CB allocations; with MLA's
                 # head dims (DHt=18, vDHt=16) the safe default is 32/32. Larger
@@ -834,6 +859,7 @@ class ttMLA:
                 scale=self.scale,
                 is_balanced=self.is_balanced,
                 cache_batch_idx=cache_batch_idx,
+                **sdpa_rotation_kwargs,
             )
 
             attn_out = ttnn.linear(

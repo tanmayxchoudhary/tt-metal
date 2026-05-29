@@ -552,6 +552,183 @@ def test_mla_chunked_prefill(
     logger.success(f"✓ Chunked prefill (N={num_chunks}) test passed")
 
 
+# Rotated-path wiring sanity (chunk-aligned kv_actual_isl → rotation degenerates to
+# chunked-natural offsets). Exercises MLA.forward's rotated branch end-to-end:
+# update_padded_kv_cache writes the chunk at the per-chip offset derived from
+# kv_actual_isl, and SDPA is invoked with kv_actual_isl set. PCC must match the
+# natural-order torch reference (same shape, same data — just a different code path).
+#
+# A true-rotation variant (kv_actual_isl not chunk-aligned, iter 0 partial-then-pad)
+# is a follow-up; this test pins down the wiring before adding the rotation case.
+@pytest.mark.parametrize("mesh_device", [(2, 4)], ids=["2x4"], indirect=True)
+@pytest.mark.parametrize(
+    "device_params",
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}],
+    ids=["line"],
+    indirect=True,
+)
+@pytest.mark.parametrize("seq_len", [10 * 1024], ids=["seq10k"])
+@pytest.mark.parametrize("num_chunks", [2], ids=lambda n: f"N{n}")
+@pytest.mark.parametrize("q_chunk_size", [32], ids=lambda q: f"q{q}")
+@pytest.mark.timeout(0)
+def test_mla_chunked_prefill_rotated_aligned(
+    request,
+    mesh_device,
+    seq_len,
+    num_chunks,
+    q_chunk_size,
+    device_params,
+):
+    """Rotated path with chunk-aligned kv_actual_isl per iter; output must match
+    natural-order reference (same as the non-rotated chunked test)."""
+    config, weights = request.getfixturevalue("random_weights")
+
+    sp_axis = 0
+    tp_axis = 1
+    is_balanced = False
+    topology = ttnn.Topology.Linear
+
+    mesh_shape = list(mesh_device.shape)
+    sp = mesh_shape[sp_axis]
+
+    chunk_size = seq_len // num_chunks
+    assert (
+        chunk_size % (ttnn.TILE_SIZE * sp) == 0
+    ), f"chunk_size {chunk_size} must be a multiple of TILE_SIZE * sp ({ttnn.TILE_SIZE * sp})"
+
+    chunk_size_local = chunk_size // sp
+    assert (
+        chunk_size_local % q_chunk_size == 0
+    ), f"q_chunk_size {q_chunk_size} must divide chunk_size_local {chunk_size_local}"
+
+    config.max_seq_len = seq_len
+
+    logger.info(
+        f"Rotated-aligned chunked prefill: seq_len={seq_len} num_chunks={num_chunks} chunk_size={chunk_size} "
+        f"sp={sp} tp={mesh_shape[tp_axis]} q_chunk_size={q_chunk_size}"
+    )
+
+    mla_ref = create_mla_reference(
+        config=config,
+        state_dict={"model.layers.0.self_attn." + k: v for k, v in weights.items()},
+        layer_idx=0,
+        module_path="model.layers.0.self_attn",
+    )
+    mla_ref = mla_ref.eval().to(torch.bfloat16)
+
+    torch.manual_seed(42)
+    hidden_states = torch.randn(1, seq_len, config.hidden_size).to(torch.bfloat16)
+    position_ids = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
+
+    ref_cache = DynamicCache()
+    with torch.no_grad():
+        ref_output, _, ref_cache = mla_ref(
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            past_key_value=ref_cache,
+            use_cache=True,
+        )
+    ref_kvpe = ref_cache.key_cache[0]
+
+    mla_tt = ttMLA(
+        config,
+        weights,
+        mesh_device,
+        layer_idx=0,
+        seq_len=seq_len,
+        sp_axis=sp_axis,
+        tp_axis=tp_axis,
+        is_balanced=is_balanced,
+        topology=topology,
+    )
+    rope_setup = RotarySetup(config, mesh_device, sp_axis=sp_axis, is_balanced=is_balanced)
+
+    kvpe_dim = config.qk_rope_head_dim + config.kv_lora_rank
+    tt_kvpe_cache = init_kvpe_cache(
+        kvpe_cache_head_dim=kvpe_dim,
+        mesh_device=mesh_device,
+        seq_len=seq_len,
+        mesh_shape=mesh_shape,
+        sp_axis=sp_axis,
+        num_kvpe_cache_layers=1,
+    )
+
+    hidden_shard_dims = [None, None]
+    hidden_shard_dims[tp_axis] = -1
+    hidden_shard_dims[sp_axis] = -2
+
+    out_concat_dims = [None, None]
+    out_concat_dims[tp_axis] = -1
+    out_concat_dims[sp_axis] = -2
+
+    per_chunk_outputs = []
+    for c in range(num_chunks):
+        chunk_start = c * chunk_size
+        chunk_end = chunk_start + chunk_size
+
+        chunk_h = hidden_states[:, chunk_start:chunk_end, :].unsqueeze(0)
+        tt_chunk_h = ttnn.from_torch(
+            chunk_h,
+            device=mesh_device,
+            dtype=ttnn.bfloat16,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_mapper=ttnn.ShardTensor2dMesh(
+                mesh_device, mesh_shape=tuple(mesh_device.shape), dims=hidden_shard_dims
+            ),
+        )
+
+        rope_tensors = rope_setup.get_rope_tensors(chunk_size, start_pos=chunk_start)
+
+        # Rotated path: pass kv_actual_isl = chunk_start (chunk-aligned, rotation
+        # degenerates to the chunked-natural per-chip offset).
+        tt_chunk_out = mla_tt.forward(
+            hidden_states=tt_chunk_h,
+            rope_tensors=rope_tensors,
+            kvpe_cache=tt_kvpe_cache,
+            kv_actual_isl=chunk_start,
+            num_cache_layers=1,
+            chunked_q_chunk_size=q_chunk_size,
+        )
+
+        out_host = ttnn.to_torch(
+            tt_chunk_out,
+            mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, dims=out_concat_dims, mesh_shape=mesh_device.shape),
+        ).to(torch.bfloat16)
+        per_chunk_outputs.append(out_host)
+
+        _, msg = assert_with_pcc(
+            ref_output[:, chunk_start:chunk_end, :].unsqueeze(0),
+            out_host,
+            0.98,
+        )
+        logger.info(f"  chunk {c} (kv_actual_isl={chunk_start}): per-chunk output PCC {msg}")
+
+    ttnn.synchronize_device(mesh_device)
+    ttnn.distributed_context_barrier()
+
+    tt_output_full = torch.cat(per_chunk_outputs, dim=2)
+    _, output_pcc = assert_with_pcc(ref_output.unsqueeze(0), tt_output_full, 0.98)
+    logger.info(f"Full output PCC is {output_pcc}")
+
+    # Final cache PCC.
+    cache_stacked = ttnn.to_torch(
+        tt_kvpe_cache,
+        mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, dims=(2, 1), mesh_shape=mesh_device.shape),
+    ).to(torch.bfloat16)
+    cache_stacked = cache_stacked[:1, :1, :, :]
+    chunk_local = chunk_size // sp
+    cache_merged = cache_stacked.reshape(1, 1, sp, num_chunks, chunk_local, kvpe_dim)
+    cache_merged = cache_merged.permute(0, 1, 3, 2, 4, 5).reshape(1, 1, seq_len, kvpe_dim)
+    kv_lora_rank = config.kv_lora_rank
+    _, kv_pcc = assert_with_pcc(ref_kvpe[:, :, :, :kv_lora_rank], cache_merged[:, :, :, :kv_lora_rank], 0.99)
+    logger.info(f"KVPE cache KV part PCC is {kv_pcc}")
+    _, pe_pcc = assert_with_pcc(ref_kvpe[:, :, :, kv_lora_rank:], cache_merged[:, :, :, kv_lora_rank:], 0.99)
+    logger.info(f"KVPE cache PE part PCC is {pe_pcc}")
+
+    logger.success(f"✓ Rotated-aligned chunked prefill (N={num_chunks}) wiring test passed")
+
+
 # sp x tp
 @pytest.mark.parametrize(
     "mesh_device",
