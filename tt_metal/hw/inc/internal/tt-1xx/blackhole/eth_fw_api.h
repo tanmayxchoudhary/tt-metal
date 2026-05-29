@@ -334,7 +334,7 @@ static void service_eth_msg() __attribute__((unused)) {
 #endif
 }
 
-static void update_boot_results_eth_link_status_check() __attribute__((unused)) {
+static __attribute__((unused)) void update_boot_results_eth_link_status_check() {
 #if defined(COMPILE_FOR_AERISC) && (PHYSICAL_AERISC_ID == 0)
     uint64_t curr_timestamp = eth_read_wall_clock();
     uint64_t next_timestamp = get_next_link_status_check_timestamp();
