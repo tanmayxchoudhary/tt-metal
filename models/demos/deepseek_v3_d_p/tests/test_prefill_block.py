@@ -74,7 +74,7 @@ PCC_THRESHOLD_KVPE = 0.999
             1,
             ttnn.Topology.Linear,
             marks=pytest.mark.requires_mesh_topology(mesh_shape=(2, 4), topology="mesh-2x4"),
-            id="mesh-2x4",
+            id="fabric2d-mesh-2x4",
         ),
         pytest.param(
             (8, 4),
@@ -86,10 +86,10 @@ PCC_THRESHOLD_KVPE = 0.999
             2,
             ttnn.Topology.Linear,
             marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
-            id="mesh-8x4",
+            id="fabric2d-mesh-8x4",
         ),
-        # FABRIC_1D fallback variants for local comparison. CI runs only FABRIC_2D (the entries above);
-        # tighten the CI -k filter to "and not 1d-" if needed.
+        # FABRIC_1D fallback variants kept for local 1D-vs-2D comparison; CI selects fabric2d-*
+        # via positive `-k` filter (see galaxy_deepseek_prefill_tests.yaml).
         pytest.param(
             (2, 4),
             {
