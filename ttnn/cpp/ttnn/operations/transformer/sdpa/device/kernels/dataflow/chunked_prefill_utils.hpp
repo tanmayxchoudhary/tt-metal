@@ -21,6 +21,10 @@
 struct ChunkedContext {
     uint32_t q_start_idx_t = 0;  // absolute Q-tile offset of this chunk's Q slab
     uint32_t ring_index = 0;     // logical ring rotation index for absolute-Q-tile compute
+    uint32_t kv_pad_q_old_start_nt = 0;
+    uint32_t kv_pad_q_old_count_nt = 0;
+    uint32_t kv_pad_q_new_start_nt = 0;
+    uint32_t kv_pad_q_valid_nt = 0;
 };
 
 /**
@@ -41,5 +45,29 @@ inline uint32_t kv_global_tile_for_local(uint32_t ring_id, uint32_t local_tile_i
                (local_tile_idx % q_local_padded_Nt);
     } else {
         return ring_id * kv_local_padded_Nt + local_tile_idx;
+    }
+}
+
+constexpr uint32_t KV_PAD_ROTATION_INVALID_TILE = 0xFFFFFFFFu;
+
+template <bool kv_pad_rotation_enabled>
+inline uint32_t q_global_tile_for_local_mask(
+    uint32_t q_tile,
+    uint32_t q_start_tile,
+    uint32_t kv_pad_q_old_start_nt = 0,
+    uint32_t kv_pad_q_old_count_nt = 0,
+    uint32_t kv_pad_q_new_start_nt = 0,
+    uint32_t kv_pad_q_valid_nt = 0) {
+    if constexpr (kv_pad_rotation_enabled) {
+        const uint32_t kv_pad_q_tile = q_start_tile + q_tile;
+        if (kv_pad_q_tile < kv_pad_q_old_count_nt) {
+            return kv_pad_q_old_start_nt + kv_pad_q_tile;
+        }
+        if (kv_pad_q_tile < kv_pad_q_valid_nt) {
+            return kv_pad_q_new_start_nt + (kv_pad_q_tile - kv_pad_q_old_count_nt);
+        }
+        return KV_PAD_ROTATION_INVALID_TILE;
+    } else {
+        return q_start_tile + q_tile;
     }
 }

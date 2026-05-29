@@ -213,6 +213,7 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
 
     auto q_chunk_size = args.get_q_chunk_size();
     auto k_chunk_size = args.get_k_chunk_size();
+    const bool has_kv_pad_rotation = args.has_kv_pad_rotation();
 
     TT_FATAL(!(L != 0 && args.is_causal), "Causality is enabled only for ring attention");
 
@@ -234,6 +235,62 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         N_local_q,
         N_local_kv,
         args.is_causal);
+
+    if (has_kv_pad_rotation) {
+        const auto kv_actual_isl = args.kv_actual_isl.value();
+        TT_FATAL(
+            is_chunked,
+            "kv_actual_isl enables KV-pad-aware rotation and requires chunked-prefill input (Q.seq < K.seq). "
+            "Got N_local_q={}, N_local_kv={}",
+            N_local_q,
+            N_local_kv);
+        TT_FATAL(
+            args.is_causal,
+            "kv_actual_isl enables KV-pad-aware rotation, which is causal-only. Got is_causal={}",
+            args.is_causal);
+        TT_FATAL(
+            N_local_kv == 2 * N_local_q,
+            "KV-pad-aware rotation currently supports one OLD slab plus one NEW slab per device. "
+            "Expected N_local_kv == 2*N_local_q, got N_local_kv={}, N_local_q={}",
+            N_local_kv,
+            N_local_q);
+        TT_FATAL(
+            L == 0,
+            "KV-pad-aware rotation currently supports ring attention without joint tokens. Got joint length L={}",
+            L);
+        TT_FATAL(
+            args.logical_n >= kv_actual_isl,
+            "logical_n must be >= kv_actual_isl. Got logical_n={}, kv_actual_isl={}",
+            args.logical_n,
+            kv_actual_isl);
+        const auto new_actual_isl = args.logical_n - kv_actual_isl;
+        const auto old_capacity = N_local_q * args.ring_size;
+        TT_FATAL(
+            kv_actual_isl % tt::constants::TILE_HEIGHT == 0 && new_actual_isl % tt::constants::TILE_HEIGHT == 0,
+            "KV-pad-aware rotation currently requires tile-aligned lengths. Got kv_actual_isl={}, "
+            "new_actual_isl={} (logical_n - kv_actual_isl), TILE_HEIGHT={}",
+            kv_actual_isl,
+            new_actual_isl,
+            tt::constants::TILE_HEIGHT);
+        TT_FATAL(
+            args.logical_n >= old_capacity,
+            "KV-pad-aware rotation currently expects OLD slabs to contain at least one full global chunk after "
+            "the current write. Got logical_n={}, OLD capacity={}",
+            args.logical_n,
+            old_capacity);
+        TT_FATAL(
+            kv_actual_isl <= old_capacity,
+            "KV-pad-aware rotation expects prior valid KV to fit in the OLD slabs. Got kv_actual_isl={}, "
+            "OLD capacity={}",
+            kv_actual_isl,
+            old_capacity);
+        TT_FATAL(
+            new_actual_isl <= old_capacity,
+            "KV-pad-aware rotation expects current valid Q to fit in one fixed chunk. Got new_actual_isl={}, "
+            "chunk capacity={}",
+            new_actual_isl,
+            old_capacity);
+    }
 
     TT_FATAL(
         !(args.is_balanced && (N_local_q / 2) % q_chunk_size != 0),
@@ -321,16 +378,13 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         N_global,
         N_local_kv,
         args.ring_size);
-    // Latent-V mode (V.seq == 0) signals "reuse K's buffer for V reads" — gathered V
-    // is empty and the reader fetches V tiles from the gathered K buffer with K's row
-    // stride, reading only the first vDHt head-dim tiles per row.
     TT_FATAL(
-        v_shape[2] == 0 || k_shape[2] == v_shape[2],
-        "Gathered V seq length must equal K seq length, or 0 for latent-V mode. Got K: {}, V: {}",
+        k_shape[2] == v_shape[2],
+        "K sequence length must be equal to V sequence length. Got K: {}, V: {}",
         k_shape[2],
         v_shape[2]);
 
-    TT_FATAL(NQH % NVH == 0, "Q num_heads must be divisible by V num_heads (GQA). Got Q: {}, V: {}", NQH, NVH);
+    TT_FATAL(NQH == NVH, "Q num_heads must be equal to V num_heads. Got Q: {}, V: {}", NQH, NVH);
     TT_FATAL(NKH == NVH || NKH == 1, "K num_heads must be equal to V num_heads or 1. Got K: {}, V: {}", NKH, NVH);
 
     // Validate chunk sizes if program config is provided
@@ -357,8 +411,8 @@ void RingJointSDPADeviceOperation::validate_on_program_cache_miss(
         N_local_kv,
         tt::constants::TILE_HEIGHT);
     TT_FATAL(
-        tensor_args.has_latent_v() || tensor_args.input_v.logical_shape()[2] == N_local_kv,
-        "V local seq length must match K local seq length, or be 0 for latent-V mode. Got V: {}, K: {}",
+        tensor_args.input_v.logical_shape()[2] == N_local_kv,
+        "V local seq length must match K local seq length. Got V: {}, K: {}",
         tensor_args.input_v.logical_shape()[2],
         N_local_kv);
 
@@ -434,6 +488,7 @@ ttsl::hash::hash_t RingJointSDPADeviceOperation::compute_program_hash(
         // cache_batch_idx is a reader runtime arg, but descriptor cache-hit patching only updates buffer rt args.
         // Keep the value in the op hash so a cached Program never reuses stale scalar rt args for another slot.
         args.cache_batch_idx,
+        args.kv_actual_isl,
         ttnn::experimental::prim::RingAttentionAllGatherAsyncDeviceOperation::compute_program_hash(
             args.all_gather_operation_attributes, args.all_gather_tensor_args) /*all_gather input tensors*/
     );
@@ -518,7 +573,8 @@ RingJointSDPAResult ring_joint_scaled_dot_product_attention(
     const std::optional<float> scale,
     const std::optional<DeviceComputeKernelConfig> compute_kernel_config,
     const ttnn::ccl::CoreAllocationStrategy core_allocation_strategy,
-    const std::optional<uint32_t> cache_batch_idx) {
+    const std::optional<uint32_t> cache_batch_idx,
+    const std::optional<uint32_t> kv_actual_isl) {
     using OperationType = ttnn::prim::RingJointSDPADeviceOperation;
 
     auto kernel_config_val = init_device_compute_kernel_config(
@@ -575,7 +631,8 @@ RingJointSDPAResult ring_joint_scaled_dot_product_attention(
         std::move(all_gather_operation_attributes),
         std::move(all_gather_tensor_args),
         ccl_core_grid_offset,
-        cache_batch_idx);
+        cache_batch_idx,
+        kv_actual_isl);
 
     auto tensor_args = OperationType::tensor_args_t{
         .input_q = input_tensor_q,

@@ -169,14 +169,9 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
 
     // q_local_padded_N (Q rows per device) can be shorter than kv_local_padded_N for chunked prefill.
     const bool indexed_kv_cache = args.has_indexed_kv_cache();
-    // Latent-V mode: V passed as seq=0 placeholder; reader reuses K's buffer and
-    // reads only the first vDHt head-dim tiles. V's head dim and NHV still come
-    // from gathered V's shape (the caller sizes that placeholder accordingly).
-    const bool v_shares_k_buffer = tensor_args.has_latent_v();
     const uint32_t B = q_shape[0];
     const uint32_t NH = q_shape[1];
     const uint32_t NHK = k_shape[1];
-    const uint32_t NHV = v_shape[1];
     const uint32_t DH = q_shape[3];
     const uint32_t q_local_padded_N = q_shape[2];
     const uint32_t kv_local_padded_N = tensor_args.local_kv_seq_len();
@@ -194,6 +189,48 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     const uint32_t DHt = DH / tt::constants::TILE_WIDTH;
     const uint32_t vDHt = vDH / tt::constants::TILE_WIDTH;
     const uint32_t logical_nt = tt::div_up(static_cast<uint32_t>(args.logical_n), tt::constants::TILE_HEIGHT);
+    const bool kv_pad_rotation_enabled = args.has_kv_pad_rotation();
+    const uint32_t kv_actual_nt = kv_pad_rotation_enabled ? args.kv_actual_isl.value() / tt::constants::TILE_HEIGHT : 0;
+    const uint32_t new_actual_nt = kv_pad_rotation_enabled ? logical_nt - kv_actual_nt : 0;
+    uint32_t kv_pad_q_old_start_nt = 0;
+    uint32_t kv_pad_q_old_count_nt = 0;
+    uint32_t kv_pad_q_new_start_nt = 0;
+    uint32_t kv_pad_q_valid_nt = 0;
+    if (kv_pad_rotation_enabled) {
+        const uint32_t old_capacity_nt = ring_size * q_local_padded_Nt;
+        const uint32_t old_pad_nt = old_capacity_nt > kv_actual_nt ? old_capacity_nt - kv_actual_nt : 0;
+        const uint32_t old_fill_nt = std::min(old_pad_nt, new_actual_nt);
+
+        const auto old_fill_on_device = [&](uint32_t chip) {
+            const uint32_t fill_start_nt = kv_actual_nt;
+            const uint32_t fill_end_nt = kv_actual_nt + old_fill_nt;
+            const uint32_t chip_start_nt = chip * q_local_padded_Nt;
+            const uint32_t chip_end_nt = chip_start_nt + q_local_padded_Nt;
+            const uint32_t start_nt = std::max(fill_start_nt, chip_start_nt);
+            const uint32_t end_nt = std::min(fill_end_nt, chip_end_nt);
+            return end_nt > start_nt ? end_nt - start_nt : 0;
+        };
+
+        kv_pad_q_old_count_nt = old_fill_on_device(device_index);
+        if (kv_pad_q_old_count_nt > 0) {
+            kv_pad_q_old_start_nt = std::max(kv_actual_nt, device_index * q_local_padded_Nt);
+        }
+
+        uint32_t remaining_new_nt = new_actual_nt - old_fill_nt;
+        uint32_t new_prefix_nt = 0;
+        for (uint32_t chip = 0; chip < device_index && remaining_new_nt > 0; ++chip) {
+            const uint32_t chip_old_fill_nt = old_fill_on_device(chip);
+            const uint32_t chip_new_capacity_nt = q_local_padded_Nt - chip_old_fill_nt;
+            const uint32_t take_nt = std::min(chip_new_capacity_nt, remaining_new_nt);
+            new_prefix_nt += take_nt;
+            remaining_new_nt -= take_nt;
+        }
+
+        const uint32_t device_new_capacity_nt = q_local_padded_Nt - kv_pad_q_old_count_nt;
+        const uint32_t q_new_count_nt = std::min(device_new_capacity_nt, remaining_new_nt);
+        kv_pad_q_new_start_nt = kv_actual_nt + old_fill_nt + new_prefix_nt;
+        kv_pad_q_valid_nt = kv_pad_q_old_count_nt + q_new_count_nt;
+    }
 
     /*
     For non-causal case we must provide a padded mask if the K sequence length has been padded
@@ -241,7 +278,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     log_debug(tt::LogOp, "B: {}", B);
     log_debug(tt::LogOp, "NH: {}", NH);
     log_debug(tt::LogOp, "NHK: {}", NHK);
-    log_debug(tt::LogOp, "NHV: {}", NHV);
     log_debug(tt::LogOp, "L: {}", L);
     log_debug(tt::LogOp, "DH: {}", DH);
     log_debug(tt::LogOp, "vDH: {}", vDH);
@@ -384,13 +420,12 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     const uint32_t out_in0_block_w = Sk_chunk_t;
     const uint32_t out_num_blocks = Sk_chunk_t / out_in0_block_w;
 
-    // Streaming compute v2: eliminates row buffers via cb_push_back_hold_wr_ptr.
-    // Streaming v2 requires q_num_subblocks > 1 (Sq_chunk_t > subblock_h) because the Phase 2
-    // pipeline assumes at least one q_subblock iteration for correct softmax drain + SALAD overlap.
-    // The `Sk_chunk_t % qk_out_subblock_w == 0` clause is tautological — the selector already
-    // guarantees it — but kept explicit for clarity of the subblock-tiling requirement.
-    const bool use_streaming_compute =
-        !fp32_dest_acc_en && qk_out_subblock_h <= 2 && Sk_chunk_t % qk_out_subblock_w == 0 && qk_in0_num_subblocks > 1;
+    // Ring-joint streaming supports single-Q-subblock shapes; only fp32 dest acc stays on the legacy path.
+    const bool use_streaming_compute = !fp32_dest_acc_en;
+    TT_FATAL(
+        !kv_pad_rotation_enabled || use_streaming_compute,
+        "kv_actual_isl requires the ring-joint streaming compute path; the compute_common.hpp path selected by "
+        "fp32_dest_acc_en=true is not supported.");
     log_debug(
         tt::LogOp,
         "use_streaming_compute: {} (is_causal={}, Sq_chunk_t={}, Sk_chunk_t={}, sbh={}, sbw={})",
@@ -505,13 +540,11 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         kernel_is_causal,
         args.is_balanced,
         static_cast<uint32_t>(enable_zigzag_balancing),
-        // Reader slot 24: chunked_enabled (writer/compute use slot 24/33 for use_streaming_compute).
+        // Reader slot 24: chunked_enabled. Writer/compute use their corresponding slot for use_streaming_compute.
         static_cast<uint32_t>(is_chunked),
         num_active_cores,
         chunk_size_t,
         static_cast<uint32_t>(indexed_kv_cache),
-        NHV,
-        static_cast<uint32_t>(v_shares_k_buffer),
     };
 
     TensorAccessorArgs(input_tensor_q.buffer()).append_to(reader_compile_time_args);
@@ -570,17 +603,12 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     // K chain selection: batch chain when NHK == 1 (MLA mode), else head chain
     // Computed early to gate resource allocation
     const bool k_uses_batch_chain = (NHK == 1);
-    const bool v_uses_batch_chain = (NHV == 1);
 
     const auto head_sems = ChainSemaphores::create(desc, core_grid_set);  // head chain (V, optionally K)
     // Only create batch semaphores for MLA mode (NHK == 1)
     std::optional<ChainSemaphores> batch_sems;
     if (k_uses_batch_chain) {
         batch_sems = ChainSemaphores::create(desc, core_grid_set);  // batch chain (K in MLA mode)
-    }
-    std::optional<ChainSemaphores> v_batch_sems;
-    if (v_uses_batch_chain) {
-        v_batch_sems = ChainSemaphores::create(desc, core_grid_set);
     }
 
     // Append semaphore ids to reader compile-time args (must match reader kernel expectations)
@@ -591,10 +619,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     if (k_uses_batch_chain) {
         batch_sems->append_to_compile_args(reader_compile_time_args);
         reader_compile_time_args.push_back(0);  // batch_mcast_enabled placeholder (patched after chain construction)
-    }
-    if (v_uses_batch_chain) {
-        v_batch_sems->append_to_compile_args(reader_compile_time_args);
-        reader_compile_time_args.push_back(0);  // v_batch_mcast_enabled placeholder (always 0 for now)
     }
 
     std::vector<uint32_t> writer_compile_time_args = {
@@ -622,11 +646,11 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         args.all_gather_operation_attributes.ring_size,
         global_n_partial_col,
         joint_l_partial_col,
-        (std::uint32_t)use_streaming_compute,
+        static_cast<std::uint32_t>(use_streaming_compute),
         kernel_is_causal,
         args.is_balanced,
         static_cast<uint32_t>(enable_zigzag_balancing),
-        (std::uint32_t)out_out_subblock_h,
+        static_cast<std::uint32_t>(out_out_subblock_h),
         static_cast<uint32_t>(is_chunked),
         chunk_size_t,
     };
@@ -634,17 +658,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     TensorAccessorArgs(output_tensor.buffer()).append_to(writer_compile_time_args);
     TensorAccessorArgs(joint_output_tensor.buffer()).append_to(writer_compile_time_args);
     TensorAccessorArgs(stats_output_tensor.buffer()).append_to(writer_compile_time_args);
-
-    // Early format check: when all data formats are identical, reconfig calls can be skipped.
-    const tt::DataFormat q_df_early = tt::tt_metal::datatype_to_dataformat_converter(input_tensor_q.dtype());
-    const tt::DataFormat k_df_early = tt::tt_metal::datatype_to_dataformat_converter(gathered_input_tensor_k.dtype());
-    const tt::DataFormat v_df_early = tt::tt_metal::datatype_to_dataformat_converter(gathered_input_tensor_v.dtype());
-    const tt::DataFormat out_df_early = tt::tt_metal::datatype_to_dataformat_converter(output_tensor.dtype());
-    const tt::DataFormat im_df_early = tt::DataFormat::Float16_b;
-    const tt::DataFormat mask_df_early = tt::DataFormat::Float16_b;
-    const bool uniform_dataformat =
-        (q_df_early == k_df_early && q_df_early == v_df_early && q_df_early == out_df_early &&
-         q_df_early == mask_df_early && q_df_early == im_df_early);
 
     std::vector<uint32_t> compute_compile_time_args = {
         B,
@@ -680,15 +693,19 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         out_in1_num_subblocks,
         out_num_blocks,
         scale_packed,
-        (std::uint32_t)use_streaming_compute,
+        static_cast<std::uint32_t>(use_streaming_compute),
         global_n_partial_col,
         joint_l_partial_col,
-        (std::uint32_t)uniform_dataformat,
         kernel_is_causal,
         args.is_balanced,
         static_cast<uint32_t>(enable_zigzag_balancing),
         static_cast<uint32_t>(is_chunked),
-        chunk_size_t};
+        chunk_size_t,
+        static_cast<uint32_t>(kv_pad_rotation_enabled),
+        kv_pad_q_old_start_nt,
+        kv_pad_q_old_count_nt,
+        kv_pad_q_new_start_nt,
+        kv_pad_q_valid_nt};
 
     std::map<std::string, std::string> defines;
     defines["STATS_GRANULARITY"] = std::to_string(stats_granularity);
@@ -735,268 +752,82 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     log_debug(tt::LogOp, "intermediate_data_format: {}", im_df);
     log_debug(tt::LogOp, "statistics_data_format: {}", stats_df);
 
-    // Q input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = q_tiles * q_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_0),
-            .data_format = q_df,
-            .page_size = q_tile_size,
-        }}},
-    });
-    // K input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = k_tiles * k_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_1),
-            .data_format = k_df,
-            .page_size = k_tile_size,
-        }}},
-    });
-    // V input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = v_tiles * v_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_2),
-            .data_format = v_df,
-            .page_size = v_tile_size,
-        }}},
-    });
+    uint32_t next_cb_index = 0;
+    const auto allocate_cb = [&](uint32_t page_size_bytes, uint32_t num_pages, tt::DataFormat data_format) -> uint32_t {
+        const uint32_t cb_index = next_cb_index++;
+        desc.cbs.push_back(CBDescriptor{
+            .total_size = page_size_bytes * num_pages,
+            .core_ranges = core_grid_set,
+            .format_descriptors = {{CBFormatDescriptor{
+                .buffer_index = static_cast<uint8_t>(cb_index),
+                .data_format = data_format,
+                .page_size = page_size_bytes,
+            }}},
+        });
+        return cb_index;
+    };
+    const auto allocate_tile_cb = [&](uint32_t num_tiles, uint32_t tile_size, tt::DataFormat data_format) -> uint32_t {
+        return allocate_cb(tile_size, num_tiles, data_format);
+    };
+
+    const uint32_t cb_q_in = allocate_tile_cb(q_tiles, q_tile_size, q_df);
+    const uint32_t cb_k_in = allocate_tile_cb(k_tiles, k_tile_size, k_df);
+    const uint32_t cb_v_in = allocate_tile_cb(v_tiles, v_tile_size, v_df);
 
     // Lightweight mask CB: holds neginf + optional causal diagonal + optional partial tiles.
     // Used for both causal (ring_iter 0) and padding (ring_iter > 0) masking.
-    if (needs_lightweight_mask) {
-        desc.cbs.push_back(CBDescriptor{
-            .total_size = total_lightweight_mask_tiles * mask_tile_size,
-            .core_ranges = core_grid_set,
-            .format_descriptors = {{CBFormatDescriptor{
-                .buffer_index = static_cast<uint8_t>(tt::CB::c_in3),
-                .data_format = mask_df,
-                .page_size = mask_tile_size,
-            }}},
-        });
-    }
+    constexpr uint32_t inactive_cb = std::numeric_limits<uint32_t>::max();
+    const uint32_t cb_mask_in =
+        needs_lightweight_mask ? allocate_tile_cb(total_lightweight_mask_tiles, mask_tile_size, mask_df) : inactive_cb;
 
-    // scale input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = scale_tiles * scalar_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_4),
-            .data_format = scalar_df,
-            .page_size = scalar_tile_size,
-        }}},
-    });
+    const uint32_t cb_scale_in = allocate_tile_cb(scale_tiles, scalar_tile_size, scalar_df);
+    const uint32_t cb_identity_scale_in = allocate_tile_cb(scale_tiles, scalar_tile_size, scalar_df);
+    const uint32_t cb_stats_in = allocate_tile_cb(statistics_tiles, im_tile_size, im_df);
+    const uint32_t cb_prev_out = allocate_tile_cb(out_im_tiles, out_tile_size, out_df);
+    const uint32_t cb_col_identity = allocate_tile_cb(scale_tiles, scalar_tile_size, scalar_df);
 
-    // identity scale input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = scale_tiles * scalar_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_5),
-            .data_format = scalar_df,
-            .page_size = scalar_tile_size,
-        }}},
-    });
+    const uint32_t cb_qk_im = allocate_tile_cb(qk_tiles, im_tile_size, im_df);
+    const uint32_t cb_out_im_A = allocate_tile_cb(out_im_tiles, im_tile_size, im_df);
+    const uint32_t cb_out_im_B = allocate_tile_cb(out_im_tiles, im_tile_size, im_df);
+    const uint32_t cb_max_A = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    const uint32_t cb_max_B = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    const uint32_t cb_sum_A = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    const uint32_t cb_sum_B = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    const uint32_t cb_exp_max_diff = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
 
-    // stats input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * im_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_6),
-            .data_format = im_df,
-            .page_size = im_tile_size,
-        }}},
-    });
+    const uint32_t cb_out = allocate_tile_cb(out0_t, out_tile_size, out_df);
+    const uint32_t cb_stats_out = allocate_tile_cb(statistics_tiles, im_tile_size, im_df);
 
-    // previous block output as input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = out_im_tiles * out_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_7),
-            .data_format = out_df,
-            .page_size = out_tile_size,
-        }}},
-    });
-
-    // column identity input
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = scale_tiles * scalar_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_8),
-            .data_format = scalar_df,
-            .page_size = scalar_tile_size,
-        }}},
-    });
-
-    // Indices c_13-c_22 match main's #44925 program-size trim (kernels use the same slots);
-    // PR previously used c_24-c_31 which exceeded the Tensix kernel-config ringbuffer.
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = qk_tiles * im_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_13),
-            .data_format = im_df,
-            .page_size = im_tile_size,
-        }}},
-    });
-
-    // cb_out_im
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = out_im_tiles * im_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_14),
-            .data_format = im_df,
-            .page_size = im_tile_size,
-        }}},
-    });
-
-    // cb_out_accumulate_im
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = out_im_tiles * im_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_15),
-            .data_format = im_df,
-            .page_size = im_tile_size,
-        }}},
-    });
-
-    // cb_cur_max
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * stats_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_18),
-            .data_format = stats_df,
-            .page_size = stats_tile_size,
-        }}},
-    });
-
-    // cb_prev_max
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * stats_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_19),
-            .data_format = stats_df,
-            .page_size = stats_tile_size,
-        }}},
-    });
-
-    // cb_cur_sum
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * stats_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_20),
-            .data_format = stats_df,
-            .page_size = stats_tile_size,
-        }}},
-    });
-
-    // cb_prev_sum
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * stats_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_21),
-            .data_format = stats_df,
-            .page_size = stats_tile_size,
-        }}},
-    });
-
-    // cb_exp_max_diff
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * stats_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_22),
-            .data_format = stats_df,
-            .page_size = stats_tile_size,
-        }}},
-    });
-
-    // Output
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = out0_t * out_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_16),
-            .data_format = out_df,
-            .page_size = out_tile_size,
-        }}},
-    });
-
-    // stats output
-    desc.cbs.push_back(CBDescriptor{
-        .total_size = statistics_tiles * im_tile_size,
-        .core_ranges = core_grid_set,
-        .format_descriptors = {{CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_17),
-            .data_format = im_df,
-            .page_size = im_tile_size,
-        }}},
-    });
-
-    // Streaming compute v2: 1-tile recip scratch CB (c_9) for normalize_row_streaming.
-    // c_4 is used by cb_scale_in in ring joint, so we use c_9 instead.
-    if (use_streaming_compute) {
-        desc.cbs.push_back(CBDescriptor{
-            .total_size = 1 * im_tile_size,
-            .core_ranges = core_grid_set,
-            .format_descriptors = {{CBFormatDescriptor{
-                .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_9),
-                .data_format = im_df,
-                .page_size = im_tile_size,
-            }}},
-        });
-    }
+    // Streaming compute v2: 1-tile recip scratch CB for normalize_row_streaming.
+    // cb_scale_in is live in ring joint, so streaming uses a dedicated scratch CB.
+    const uint32_t cb_recip_scratch = use_streaming_compute ? allocate_tile_cb(1, im_tile_size, im_df) : inactive_cb;
 
     // Deferred norm: sum save/restore CBs for multi Q-chunk DRAM round-trip.
-    // cb_sum_out (c_10) = compute pushes sum for writer to save to DRAM.
-    // cb_sum_in (c_11) = writer pushes restored sum from DRAM for compute to read.
-    if (use_streaming_compute) {
-        desc.cbs.push_back(CBDescriptor{
-            .total_size = statistics_tiles * stats_tile_size,
-            .core_ranges = core_grid_set,
-            .format_descriptors = {{CBFormatDescriptor{
-                .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_10),
-                .data_format = stats_df,
-                .page_size = stats_tile_size,
-            }}},
-        });
+    // cb_sum_out = compute pushes sum for writer to save to DRAM.
+    // cb_sum_in = writer pushes restored sum from DRAM for compute to read.
+    const uint32_t cb_sum_out =
+        use_streaming_compute ? allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df) : inactive_cb;
+    const uint32_t cb_sum_in =
+        use_streaming_compute ? allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df) : inactive_cb;
 
-        desc.cbs.push_back(CBDescriptor{
-            .total_size = statistics_tiles * stats_tile_size,
-            .core_ranges = core_grid_set,
-            .format_descriptors = {{CBFormatDescriptor{
-                .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_11),
-                .data_format = stats_df,
-                .page_size = stats_tile_size,
-            }}},
-        });
+    // Signal CB: compute signals writer when last K-chunk starts.
+    // 1 page suffices: writer pops during SALAD before compute pushes the next Q's signal.
+    constexpr uint32_t signal_page_size = 16;
+    const uint32_t cb_signal =
+        use_streaming_compute ? allocate_cb(signal_page_size, 1, tt::DataFormat::UInt16) : inactive_cb;
 
-        // Signal CB (c_12): compute signals writer when last K-chunk starts.
-        // 1 page suffices: writer pops during SALAD before compute pushes the next Q's signal.
-        constexpr uint32_t signal_page_size = 16;
-        desc.cbs.push_back(CBDescriptor{
-            .total_size = signal_page_size,
-            .core_ranges = core_grid_set,
-            .format_descriptors = {{CBFormatDescriptor{
-                .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_12),
-                .data_format = tt::DataFormat::UInt16,
-                .page_size = signal_page_size,
-            }}},
-        });
-    }
+    const std::vector<uint32_t> cb_compile_time_args = {
+        cb_q_in,     cb_k_in,     cb_v_in,         cb_mask_in,       cb_scale_in,    cb_identity_scale_in,
+        cb_stats_in, cb_prev_out, cb_col_identity, cb_recip_scratch, cb_sum_out,     cb_sum_in,
+        cb_signal,   cb_out,      cb_stats_out,    cb_qk_im,         cb_out_im_A,    cb_out_im_B,
+        cb_max_A,    cb_max_B,    cb_sum_A,        cb_sum_B,         cb_exp_max_diff};
+    const std::vector<uint32_t> reader_cb_compile_time_args = {cb_q_in, cb_k_in, cb_v_in};
+    reader_compile_time_args.insert(
+        reader_compile_time_args.end(), reader_cb_compile_time_args.begin(), reader_cb_compile_time_args.end());
+    writer_compile_time_args.insert(
+        writer_compile_time_args.end(), cb_compile_time_args.begin(), cb_compile_time_args.end());
+    compute_compile_time_args.insert(
+        compute_compile_time_args.end(), cb_compile_time_args.begin(), cb_compile_time_args.end());
 
     auto* const q_buf = input_tensor_q.buffer();
     auto* const k_buf = input_tensor_k.buffer();
@@ -1080,10 +911,8 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
     };
 
     std::vector<CoreWork> core_work(num_cores);
-    std::vector<ChainConfig> head_chain_configs(num_cores);     // V chain (head-level), optionally K in non-MLA
-    std::vector<ChainConfig> batch_chain_configs(num_cores);    // K chain (batch-level) in MLA mode
-    std::vector<ChainConfig> v_batch_chain_configs(num_cores);  // V chain (batch-level) when NHV == 1
-    std::vector<uint32_t> v_chain_max_q(num_cores, 0);          // per-core loop-padding count for V batch chain
+    std::vector<ChainConfig> head_chain_configs(num_cores);   // V chain (head-level), optionally K in non-MLA
+    std::vector<ChainConfig> batch_chain_configs(num_cores);  // K chain (batch-level) in MLA mode
     const uint32_t total_heads = B * NH;
     std::vector<std::vector<HeadSegmentRef>> head_segments(total_heads);
 
@@ -1444,39 +1273,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         }
     }
 
-    // Build batch chains (V chain): one per batch when NHV == 1 (MLA absorption mode).
-    // Same topology as K batch chain — V is also shared across all heads when NHV == 1.
-    if (NHV == 1) {
-        std::map<uint32_t, std::vector<uint32_t>> batch_to_cores;
-        for (uint32_t i = 0; i < num_cores; ++i) {
-            if (core_work[i].global_q_count == 0) {
-                continue;
-            }
-            for (const auto& hw : core_work[i].head_work) {
-                batch_to_cores[hw.batch].push_back(i);
-                break;
-            }
-        }
-
-        for (auto& [batch, core_indices] : batch_to_cores) {
-            std::sort(core_indices.begin(), core_indices.end(), [&](uint32_t a, uint32_t b) {
-                const auto& pa = core_work[a].physical_core;
-                const auto& pb = core_work[b].physical_core;
-                return (pa.y < pb.y) || (pa.y == pb.y && pa.x < pb.x);
-            });
-
-            std::vector<ChainSegment> chain_segs;
-            chain_segs.reserve(core_indices.size());
-            for (uint32_t ci : core_indices) {
-                chain_segs.emplace_back(ci, core_work[ci].global_q_count);
-                v_chain_max_q[ci] = core_work[ci].global_q_count;
-            }
-            if (build_linear_chain(chain_segs, batch, 0, v_batch_chain_configs, core_work)) {
-                log_debug(tt::LogOp, "V unicast chain for batch {}: {} cores", batch, chain_segs.size());
-            }
-        }
-    }
-
     // K multicast pass: one mcast chain per logical row. Each chain's injector is
     // the greedy max-work core in its row, picked under a FIFO-windowed physical-
     // column exclusion (window size grid_size.x - 1): successive chains always land
@@ -1603,12 +1399,7 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         reader_compile_time_args[sem_args_offset + 7] = k_mcast_enabled ? 1 : 0;
     }
 
-    // V batch chain mcast: not enabled in this implementation (unicast only)
-    if (v_uses_batch_chain) {
-        log_info(tt::LogOp, "V chain mode: batch (unicast)");
-    } else {
-        log_info(tt::LogOp, "V chain mode: head ({})", head_mcast_enabled ? "mcast" : "unicast");
-    }
+    log_info(tt::LogOp, "V chain mode: head ({})", head_mcast_enabled ? "mcast" : "unicast");
     if (k_uses_batch_chain) {
         log_info(
             tt::LogOp,
@@ -1687,7 +1478,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
         // Append chain runtime args for store-and-forward
         const auto& head_chain = head_chain_configs.at(i);
         const auto& batch_chain = batch_chain_configs.at(i);
-        const auto& v_batch_chain_cfg = v_batch_chain_configs.at(i);
 
         log_debug(
             tt::LogOp,
@@ -1717,14 +1507,6 @@ tt::tt_metal::ProgramDescriptor RingJointSDPAProgramFactory::create_descriptor(
             batch_chain.append_to_args(batch_chain_args);
             reader_args.append(batch_chain_args);
             reader_args.push_back(k_chain_max_q[i]);  // For K mcast loop padding (per-chain)
-        }
-
-        // V batch chain args (when NHV == 1)
-        if (v_uses_batch_chain) {
-            std::vector<uint32_t> v_batch_chain_args;
-            v_batch_chain_cfg.append_to_args(v_batch_chain_args);
-            reader_args.append(v_batch_chain_args);
-            reader_args.push_back(v_chain_max_q[i]);
         }
 
         // Inject fused-op synchronization RT args (AllGather) here; it will append to reader_args

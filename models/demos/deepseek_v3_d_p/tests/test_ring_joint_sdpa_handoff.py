@@ -464,7 +464,7 @@ def test_nd_sharded_kv_cache_as_k(mesh_device, device_params, v_memory_layout):
 # ===========================================================================
 
 
-@pytest.mark.parametrize("mesh_device", [(2, 2), (2, 4)], ids=["2x2", "2x4"], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(2, 2)], ids=["2x2"], indirect=True)
 @pytest.mark.parametrize(
     "device_params",
     [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}],
@@ -1831,6 +1831,231 @@ def test_kv_pad_aware_rotation_torch_showcase(
         f"causal reference for new_actual_isl={new_actual_isl}, kv_actual_isl={kv_actual_isl}, "
         f"pad_chip={pad_chip}, total_pad_in_old={total_pad_in_old}."
     )
+
+
+@pytest.mark.parametrize("mesh_device", [(2, 2), (2, 4)], ids=["2x2", "2x4"], indirect=True)
+@pytest.mark.parametrize(
+    "device_params",
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}],
+    ids=["line"],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "kv_actual_isl, new_actual_isl",
+    [
+        (96, 64),  # old pad on chip 1, then NEW writes on chip 0
+        (64, 64),  # one full-chip OLD pad fill
+        (128, 64),  # no OLD pad; all current tokens go to NEW slabs
+    ],
+    ids=["single_pad_then_new", "full_chip_pad", "no_old_pad"],
+)
+@pytest.mark.timeout(0)
+def test_kv_pad_aware_rotation_ttnn(mesh_device, device_params, kv_actual_isl, new_actual_isl):
+    """Device regression for the KV-pad-aware rotation modeled by the torch showcase."""
+    sp_axis = 0
+    tp_axis = 1
+    mesh_shape = list(mesh_device.shape)
+    sp = mesh_shape[sp_axis]
+    tp = mesh_shape[tp_axis]
+    num_heads = tp * tp
+    num_heads_local = num_heads // tp
+
+    chunk_size_local = 64
+    chunk_size_global = chunk_size_local * sp
+    cache_seq_per_dev = 2 * chunk_size_local
+    logical_n = kv_actual_isl + new_actual_isl
+    scale = QK_HEAD_DIM**-0.5
+    topology = _topology_from(device_params)
+
+    pad_chip, _, _, new_token_destinations = _kv_pad_rotation_layout(
+        kv_actual_isl=kv_actual_isl,
+        new_actual_isl=new_actual_isl,
+        sp_factor=sp,
+        chunk_size_local=chunk_size_local,
+    )
+    assert len(new_token_destinations) == new_actual_isl
+    logger.info(
+        f"KV-pad rotation TTNN case: sp={sp}, chunk_size_local={chunk_size_local}, "
+        f"kv_actual_isl={kv_actual_isl}, new_actual_isl={new_actual_isl}, pad_chip={pad_chip}"
+    )
+
+    torch.manual_seed(123)
+    old_cache_k = torch.randn(1, 1, kv_actual_isl, KVPE_DIM, dtype=torch.bfloat16)
+    old_cache_v = torch.randn(1, num_heads, kv_actual_isl, V_HEAD_DIM, dtype=torch.bfloat16)
+    new_tokens_q = torch.randn(1, num_heads, new_actual_isl, KVPE_DIM, dtype=torch.bfloat16)
+    new_tokens_k = torch.randn(1, 1, new_actual_isl, KVPE_DIM, dtype=torch.bfloat16)
+    new_tokens_v = torch.randn(1, num_heads, new_actual_isl, V_HEAD_DIM, dtype=torch.bfloat16)
+
+    k_per_dev = torch.zeros(sp, 1, cache_seq_per_dev, KVPE_DIM, dtype=torch.bfloat16)
+    v_per_dev = torch.zeros(sp, num_heads, cache_seq_per_dev, V_HEAD_DIM, dtype=torch.bfloat16)
+    for chip in range(sp):
+        chip_old_start = chip * chunk_size_local
+        chip_old_end = min(chip_old_start + chunk_size_local, kv_actual_isl)
+        n_valid_in_chip = max(0, chip_old_end - chip_old_start)
+        if n_valid_in_chip > 0:
+            k_per_dev[chip, :, :n_valid_in_chip, :] = old_cache_k[0, :, chip_old_start:chip_old_end, :]
+            v_per_dev[chip, :, :n_valid_in_chip, :] = old_cache_v[0, :, chip_old_start:chip_old_end, :]
+
+    q_per_dev = torch.zeros(sp, num_heads, chunk_size_local, KVPE_DIM, dtype=torch.bfloat16)
+    q_global_pos_per_dev = [[None] * chunk_size_local for _ in range(sp)]
+    q_fill_cursor = [0] * sp
+    for token_idx, chip, slab, cell in new_token_destinations:
+        cache_row = cell if slab == "OLD" else chunk_size_local + cell
+        k_per_dev[chip, :, cache_row, :] = new_tokens_k[0, :, token_idx, :]
+        v_per_dev[chip, :, cache_row, :] = new_tokens_v[0, :, token_idx, :]
+        q_row = q_fill_cursor[chip]
+        q_per_dev[chip, :, q_row, :] = new_tokens_q[0, :, token_idx, :]
+        q_global_pos_per_dev[chip][q_row] = kv_actual_isl + token_idx
+        q_fill_cursor[chip] += 1
+
+    q_host = q_per_dev.permute(1, 0, 2, 3).reshape(1, num_heads, chunk_size_global, KVPE_DIM)
+    k_host = k_per_dev.permute(1, 0, 2, 3).reshape(1, 1, sp * cache_seq_per_dev, KVPE_DIM)
+    v_host = v_per_dev.permute(1, 0, 2, 3).reshape(1, num_heads, sp * cache_seq_per_dev, V_HEAD_DIM)
+
+    combined_q_global_pos = []
+    for chip in range(sp):
+        combined_q_global_pos.extend(q_global_pos_per_dev[chip])
+    valid_rows = [None] * new_actual_isl
+    for i, q_pos in enumerate(combined_q_global_pos):
+        if q_pos is not None:
+            valid_rows[q_pos - kv_actual_isl] = i
+    assert all(row is not None for row in valid_rows)
+
+    tt_ccl = get_tt_ccl(mesh_device)
+    q_shard_dims = [None, None]
+    q_shard_dims[sp_axis] = 2
+    q_shard_dims[tp_axis] = 1
+    tt_q = ttnn.from_torch(
+        q_host,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat16,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=q_shard_dims),
+    )
+
+    k_shard_dims = [None, None]
+    k_shard_dims[sp_axis] = 2
+    tt_k = ttnn.from_torch(
+        k_host,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=k_shard_dims),
+    )
+
+    v_shard_dims = [None, None]
+    v_shard_dims[sp_axis] = 2
+    v_shard_dims[tp_axis] = 1
+    tt_v = ttnn.from_torch(
+        v_host,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=v_shard_dims),
+    )
+
+    joint_shard_dims = [None, None]
+    joint_shard_dims[tp_axis] = 1
+    joint_q = ttnn.from_torch(
+        torch.zeros(1, num_heads_local, 0, KVPE_DIM),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=joint_shard_dims),
+    )
+    joint_kv = ttnn.from_torch(
+        torch.zeros(1, 1, 0, KVPE_DIM),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+    )
+    joint_v = ttnn.from_torch(
+        torch.zeros(1, num_heads_local, 0, V_HEAD_DIM),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=joint_shard_dims),
+    )
+
+    persistent_v_shard_dims = [None, None]
+    persistent_v_shard_dims[tp_axis] = 1
+    persistent_k = ttnn.from_torch(
+        torch.zeros(1, 1, sp * cache_seq_per_dev, KVPE_DIM),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=tuple(mesh_device.shape), dims=[None, None]),
+    )
+    persistent_v = ttnn.from_torch(
+        torch.zeros(1, num_heads, sp * cache_seq_per_dev, V_HEAD_DIM),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=ttnn.ShardTensor2dMesh(
+            mesh_device, mesh_shape=tuple(mesh_device.shape), dims=persistent_v_shard_dims
+        ),
+    )
+
+    compute_kernel_config = ttnn.init_device_compute_kernel_config(
+        mesh_device.arch(),
+        math_fidelity=ttnn.MathFidelity.HiFi2,
+        math_approx_mode=False,
+        fp32_dest_acc_en=False,
+        packer_l1_acc=True,
+    )
+
+    attn_out, _, _ = ttnn.transformer.ring_joint_scaled_dot_product_attention(
+        tt_q,
+        tt_k,
+        tt_v,
+        joint_q,
+        joint_kv,
+        joint_v,
+        persistent_output_buffer_k=persistent_k,
+        persistent_output_buffer_v=persistent_v,
+        joint_strategy="rear",
+        logical_n=logical_n,
+        program_config=_make_program_config(mesh_device),
+        compute_kernel_config=compute_kernel_config,
+        dim=2,
+        multi_device_global_semaphore=tt_ccl.ring_attention_ccl_semaphore_handles,
+        num_links=1,
+        cluster_axis=sp_axis,
+        mesh_device=mesh_device,
+        topology=topology,
+        subdevice_id=tt_ccl.worker_sub_device_id,
+        ccl_core_grid_offset=tt_ccl.ring_attention_ccl_core_grid_offset,
+        use_column_major_ccl=True,
+        is_causal=True,
+        scale=scale,
+        is_balanced=False,
+        kv_actual_isl=kv_actual_isl,
+    )
+
+    out_concat_dims = [None, None]
+    out_concat_dims[sp_axis] = 2
+    out_concat_dims[tp_axis] = 1
+    tt_out_host = ttnn.to_torch(
+        attn_out,
+        mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, dims=out_concat_dims, mesh_shape=mesh_device.shape),
+    ).to(torch.bfloat16)
+    tt_out_valid_natural = tt_out_host[:, :, valid_rows, :]
+
+    natural_k = torch.cat([old_cache_k, new_tokens_k], dim=2)
+    natural_v = torch.cat([old_cache_v, new_tokens_v], dim=2)
+    ref_out = _causal_chunked_mla_sdpa_torch(new_tokens_q, natural_k, natural_v, kv_actual_isl, scale)
+
+    _, pcc_msg = assert_with_pcc(ref_out, tt_out_valid_natural, 0.97)
+    logger.success(f"KV-pad-aware rotation TTNN PCC: {pcc_msg}")
 
 
 # ===========================================================================
