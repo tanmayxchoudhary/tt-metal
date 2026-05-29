@@ -174,8 +174,8 @@ void kernel_main() {
             i, dispatch_table_addr_gen, dispatch_table_base_addr + i * aligned_dispatch_table_page_size);
     }
     noc_async_read_barrier();
-    uint32_t* offsets = reinterpret_cast<uint32_t*>(offsets_base_addr);
-    int32_t* expert_dispatch_table = reinterpret_cast<int32_t*>(dispatch_table_base_addr);
+    tt_l1_ptr uint32_t* offsets = reinterpret_cast<tt_l1_ptr uint32_t*>(offsets_base_addr);
+    tt_l1_ptr int32_t* expert_dispatch_table = reinterpret_cast<tt_l1_ptr int32_t*>(dispatch_table_base_addr);
 
     // ===== Indices / weights scratch (overwritten per batch, single page slot used) =====
     cb_reserve_back(cb_indices_id, read_batch_size);
@@ -225,8 +225,10 @@ void kernel_main() {
         uint32_t entry_off = 8;  // entries start at u32 offset 8 (32B header)
 
         for (uint32_t t = 0; t < batch_count; t++) {
-            int32_t* indices_t = reinterpret_cast<int32_t*>(indices_base + t * aligned_indices_page_size);
-            uint16_t* weights_t = reinterpret_cast<uint16_t*>(weights_base + t * aligned_weights_page_size);
+            tt_l1_ptr int32_t* indices_t =
+                reinterpret_cast<tt_l1_ptr int32_t*>(indices_base + t * aligned_indices_page_size);
+            tt_l1_ptr uint16_t* weights_t =
+                reinterpret_cast<tt_l1_ptr uint16_t*>(weights_base + t * aligned_weights_page_size);
             uint32_t token_idx = batch_start + t;
 
             for (uint32_t k = 0; k < num_experts_per_tok; k++) {
