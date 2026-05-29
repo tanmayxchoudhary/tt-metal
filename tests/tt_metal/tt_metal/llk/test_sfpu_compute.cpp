@@ -1186,7 +1186,6 @@ TEST_P(SingleCoreSingleMeshDeviceSfpuTernaryParameterizedFixture, TensixSfpuTern
     }
 }
 
-// TODO: BinarySFPU ops here can only do 1 tile due to the hardcoding in the macros to indicies (0,1,2)
 INSTANTIATE_TEST_SUITE_P(
     SingleCoreSfpuTernaryCompute,
     SingleCoreSingleMeshDeviceSfpuTernaryParameterizedFixture,
