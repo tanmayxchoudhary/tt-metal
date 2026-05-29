@@ -753,7 +753,7 @@ __attribute__((noinline)) void trace_only_init() {
 
 #define DeviceZoneSetCounter(counter) ((void)(counter))
 
-#define DeviceTimestampedData(data_id, data) ((void)(data_id) + sizeof(data))
+#define DeviceTimestampedData(data_id, data) ((void)(sizeof(data_id) + sizeof(data)))
 
 #define DeviceRecordEvent(event_id) ((void)(event_id))
 
