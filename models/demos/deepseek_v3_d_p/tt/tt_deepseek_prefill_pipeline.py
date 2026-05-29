@@ -138,10 +138,6 @@ class TtDeepSeekPrefillPipeline:
     def compile(self) -> None:
         assert self.model_built and self.kv_cache_allocated
         max_seq_len = self.config.max_seq_len
-        logger.warning(
-            "TtDeepSeekPrefillPipeline: temperature is hardcoded to 0.0 (greedy argmax). "
-            "Sampling is not yet supported — every prefill() returns the argmax token."
-        )
         logger.info(f"TtDeepSeekPrefillPipeline.compile() — warming up with {max_seq_len} tokens")
         t0 = time.perf_counter()
         tt_token_ids = self._prepare_input_tensor([0] * max_seq_len)

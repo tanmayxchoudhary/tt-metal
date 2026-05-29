@@ -529,115 +529,38 @@ class ttMLA:
         on_layer_complete: Optional[Callable[[int], None]] = None,
         actual_isl: Optional[int] = None,
     ) -> ttnn.Tensor:
+        if self.kv_only:
+            return self._forward_kv_only(
+                hidden_states, rope_tensors, kvpe_cache, cache_layer_idx, on_layer_complete, actual_isl
+            )
+
         signpost(header="MLA_START")
         num_heads_local = self.num_heads // self.tp_factor
         seq_len_local = hidden_states.shape[2]
 
-        # Q branch is skipped entirely in kv_only mode (last layer just fills
-        # the KV cache for migration). The KV branch + cache fill below run as
-        # usual; SDPA + wo are also skipped at the end of this function.
-        if not self.kv_only:
-            # q_projection
-            tt_q = ttnn.linear(
-                hidden_states,
-                self.q_a_proj_weight,
-                compute_kernel_config=self.default_compute_kernel_config,
-                **self._get_mm_kwargs("q_a_proj", seq_len_local),
-            )
-
-            # All reduce (skip for single-device TP)
-            if self.tp_factor > 1:
-                tt_q = ttnn.experimental.reduce_scatter_minimal_async(
-                    tt_q,
-                    persistent_output_buffers=None,
-                    dim=3,
-                    multi_device_global_semaphore=self.tt_ccl.get_and_cycle_rs_semaphore_handles(
-                        cluster_axis=self.tp_axis
-                    ),
-                    barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
-                    num_links=self.ccl_num_links,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    topology=self.ccl_topology,
-                    cluster_axis=self.tp_axis,
-                )
-                tt_q = ttnn.experimental.all_gather_async(
-                    tt_q,
-                    dim=3,
-                    multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(
-                        cluster_axis=self.tp_axis
-                    ),
-                    barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
-                    num_links=self.ccl_num_links,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    topology=self.ccl_topology,
-                    cluster_axis=self.tp_axis,
-                )
-
-            # rmsnorm
-            tt_q = ttnn.rms_norm(
-                tt_q,
-                weight=self.q_a_layernorm_weight,
-                epsilon=self.config.rms_norm_eps,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                compute_kernel_config=self.default_compute_kernel_config,
-            )
-            tt_q = ttnn.linear(
-                tt_q,
-                self.q_b_proj_weight,
-                compute_kernel_config=self.default_compute_kernel_config,
-                **self._get_mm_kwargs("q_b_proj", seq_len_local),
-            )
-
-            # convert to
-            # [batch (1), num_heads_local, seq_len_local, qk_head_dim]
-            tt_q, _, _ = ttnn.experimental.nlp_create_qkv_heads(
-                tt_q,
-                num_heads=num_heads_local,
-                num_kv_heads=0,
-                transpose_k_heads=False,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-
-            # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
-            tt_q_nope = ttnn.slice(tt_q, [0, 0, 0, 0], [1, num_heads_local, seq_len_local, self.qk_nope_head_dim])
-            tt_q_rope = ttnn.slice(
-                tt_q, [0, 0, 0, self.qk_nope_head_dim], [1, num_heads_local, seq_len_local, self.qk_head_dim]
-            )
-            ttnn.deallocate(tt_q)
-
-            tt_q_nope = ttnn.linear(
-                tt_q_nope,
-                self.wkv_b1_weight,
-                compute_kernel_config=self.default_compute_kernel_config,
-                **self._get_mm_kwargs("wkv_b1", seq_len_local),
-            )
-
-            tt_q_rope = ttnn.experimental.rotary_embedding_llama(
-                tt_q_rope,
-                rope_tensors["cos_matrix"],
-                rope_tensors["sin_matrix"],
-                rope_tensors["trans_matrix"],
-                is_decode_mode=False,
-            )
-
-            # TODO: concat rope and nope, workaround remove with ttnn.narrow or fusion
-            tt_q = ttnn.concat([tt_q_nope, tt_q_rope], dim=-1)
-            ttnn.deallocate(tt_q_nope)
-            ttnn.deallocate(tt_q_rope)
-
-        # kv
-        tt_kv = ttnn.linear(
+        # Q branch
+        tt_q = ttnn.linear(
             hidden_states,
-            self.kv_a_proj_with_mqa_weight,
+            self.q_a_proj_weight,
             compute_kernel_config=self.default_compute_kernel_config,
-            **self._get_mm_kwargs("kv_a_proj_with_mqa", seq_len_local),
+            **self._get_mm_kwargs("q_a_proj", seq_len_local),
         )
 
-        # All reduce (skip for single-device TP)
         if self.tp_factor > 1:
-            tt_kv = ttnn.experimental.all_gather_async(
-                tt_kv,
-                dim=1,
+            tt_q = ttnn.experimental.reduce_scatter_minimal_async(
+                tt_q,
+                persistent_output_buffers=None,
+                dim=3,
+                multi_device_global_semaphore=self.tt_ccl.get_and_cycle_rs_semaphore_handles(cluster_axis=self.tp_axis),
+                barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
+                num_links=self.ccl_num_links,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                topology=self.ccl_topology,
+                cluster_axis=self.tp_axis,
+            )
+            tt_q = ttnn.experimental.all_gather_async(
+                tt_q,
+                dim=3,
                 multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(cluster_axis=self.tp_axis),
                 barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
                 num_links=self.ccl_num_links,
@@ -645,27 +568,46 @@ class ttMLA:
                 topology=self.ccl_topology,
                 cluster_axis=self.tp_axis,
             )
-            tt_kv = ttnn.experimental.fast_reduce_nc(
-                tt_kv, dims=[1], output=None, compute_kernel_config=self.hifi4_fp32_compute_kernel_config
-            )
 
-        # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
-        tt_kv_nope = ttnn.slice(tt_kv, [0, 0, 0, 0], [1, 1, seq_len_local, self.kv_lora_rank])
-        tt_kv_rope = ttnn.slice(
-            tt_kv, [0, 0, 0, self.kv_lora_rank], [1, 1, seq_len_local, self.kv_lora_rank + self.qk_rope_head_dim]
-        )
-        ttnn.deallocate(tt_kv)
-
-        tt_kv_nope = ttnn.rms_norm(
-            tt_kv_nope,
-            weight=self.kv_a_layernorm_weight,
+        tt_q = ttnn.rms_norm(
+            tt_q,
+            weight=self.q_a_layernorm_weight,
             epsilon=self.config.rms_norm_eps,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             compute_kernel_config=self.default_compute_kernel_config,
         )
+        tt_q = ttnn.linear(
+            tt_q,
+            self.q_b_proj_weight,
+            compute_kernel_config=self.default_compute_kernel_config,
+            **self._get_mm_kwargs("q_b_proj", seq_len_local),
+        )
 
-        tt_kv_rope = ttnn.experimental.rotary_embedding_llama(
-            tt_kv_rope,
+        # [batch (1), num_heads_local, seq_len_local, qk_head_dim]
+        tt_q, _, _ = ttnn.experimental.nlp_create_qkv_heads(
+            tt_q,
+            num_heads=num_heads_local,
+            num_kv_heads=0,
+            transpose_k_heads=False,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
+        tt_q_nope = ttnn.slice(tt_q, [0, 0, 0, 0], [1, num_heads_local, seq_len_local, self.qk_nope_head_dim])
+        tt_q_rope = ttnn.slice(
+            tt_q, [0, 0, 0, self.qk_nope_head_dim], [1, num_heads_local, seq_len_local, self.qk_head_dim]
+        )
+        ttnn.deallocate(tt_q)
+
+        tt_q_nope = ttnn.linear(
+            tt_q_nope,
+            self.wkv_b1_weight,
+            compute_kernel_config=self.default_compute_kernel_config,
+            **self._get_mm_kwargs("wkv_b1", seq_len_local),
+        )
+
+        tt_q_rope = ttnn.experimental.rotary_embedding_llama(
+            tt_q_rope,
             rope_tensors["cos_matrix"],
             rope_tensors["sin_matrix"],
             rope_tensors["trans_matrix"],
@@ -673,38 +615,16 @@ class ttMLA:
         )
 
         # TODO: concat rope and nope, workaround remove with ttnn.narrow or fusion
-        tt_kvpe = ttnn.concat([tt_kv_nope, tt_kv_rope], dim=-1)
-        ttnn.deallocate(tt_kv_rope)
-        tt_kvpe = ttnn.typecast(tt_kvpe, dtype=ttnn.bfloat8_b)
+        tt_q = ttnn.concat([tt_q_nope, tt_q_rope], dim=-1)
+        ttnn.deallocate(tt_q_nope)
+        ttnn.deallocate(tt_q_rope)
 
-        # Zero the padding region of THIS layer's slot before fill so migration
-        # streams clean zeros (not residual data from a prior request) for the
-        # decode side. Slice the cache to batch=cache_layer_idx so the page math
-        # in zero_cache_range hits this layer's slot, not layer 0.
-        if on_layer_complete is not None:
-            assert actual_isl is not None, "actual_isl required when on_layer_complete is set"
-            seq_len_local = kvpe_cache.shape[2]
-            seq_len_total = seq_len_local * self.sp_factor
-            zero_cache_padding_zigzag(
-                kvpe_cache=kvpe_cache[cache_layer_idx],
-                global_end_token=actual_isl,
-                sp_factor=self.sp_factor,
-                seq_len=seq_len_total,
-                decode_chunk_align=DECODE_CHUNK_ALIGN,
-                tp_factor=self.tp_factor,
-            )
+        # KV branch + cache fill
+        tt_kv_nope, tt_kvpe = self._kv_branch_and_fill_cache(
+            hidden_states, rope_tensors, kvpe_cache, cache_layer_idx, on_layer_complete, actual_isl
+        )
 
-        ttnn.kv_cache.fill_cache_for_user_(kvpe_cache, tt_kvpe, cache_layer_idx)
-
-        if on_layer_complete is not None:
-            on_layer_complete(self.layer_idx)
-
-        # Last layer (kv_only) is done: KV cache filled, migration callback
-        # fired. No SDPA / wo to run; nothing downstream consumes the output.
-        if self.kv_only:
-            signpost(header="MLA_END")
-            return None
-
+        # SDPA + output projection
         tt_v_embedding = ttnn.linear(
             tt_kv_nope,
             self.wkv_b2_weight,
@@ -761,3 +681,111 @@ class ttMLA:
             out = v_out
         signpost(header="MLA_END")
         return out
+
+    def _forward_kv_only(
+        self,
+        hidden_states: ttnn.Tensor,
+        rope_tensors: dict,
+        kvpe_cache: ttnn.Tensor,
+        cache_layer_idx: int,
+        on_layer_complete: Optional[Callable[[int], None]],
+        actual_isl: Optional[int],
+    ) -> None:
+        """Last-layer fast path: fill KV cache + fire migration callback. No Q, no SDPA, no wo.
+        Used when migration handles downstream signaling, so no first-token output is needed.
+        """
+        signpost(header="MLA_START")
+        self._kv_branch_and_fill_cache(
+            hidden_states, rope_tensors, kvpe_cache, cache_layer_idx, on_layer_complete, actual_isl
+        )
+        signpost(header="MLA_END")
+        return None
+
+    def _kv_branch_and_fill_cache(
+        self,
+        hidden_states: ttnn.Tensor,
+        rope_tensors: dict,
+        kvpe_cache: ttnn.Tensor,
+        cache_layer_idx: int,
+        on_layer_complete: Optional[Callable[[int], None]],
+        actual_isl: Optional[int],
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        """KV-side computation shared by full forward and kv-only forward:
+        kv_a_proj → reduce → split → kv_a_layernorm + rope → concat+typecast → fill KV cache + migration callback.
+        Returns (tt_kv_nope, tt_kvpe); the full forward needs both downstream (wkv_b2 + SDPA),
+        the kv-only forward discards the return.
+        """
+        seq_len_local = hidden_states.shape[2]
+
+        tt_kv = ttnn.linear(
+            hidden_states,
+            self.kv_a_proj_with_mqa_weight,
+            compute_kernel_config=self.default_compute_kernel_config,
+            **self._get_mm_kwargs("kv_a_proj_with_mqa", seq_len_local),
+        )
+
+        if self.tp_factor > 1:
+            tt_kv = ttnn.experimental.all_gather_async(
+                tt_kv,
+                dim=1,
+                multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(cluster_axis=self.tp_axis),
+                barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(cluster_axis=self.tp_axis),
+                num_links=self.ccl_num_links,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                topology=self.ccl_topology,
+                cluster_axis=self.tp_axis,
+            )
+            tt_kv = ttnn.experimental.fast_reduce_nc(
+                tt_kv, dims=[1], output=None, compute_kernel_config=self.hifi4_fp32_compute_kernel_config
+            )
+
+        # TODO: split rope and nope, workaround remove with ttnn.narrow or fusion
+        tt_kv_nope = ttnn.slice(tt_kv, [0, 0, 0, 0], [1, 1, seq_len_local, self.kv_lora_rank])
+        tt_kv_rope = ttnn.slice(
+            tt_kv, [0, 0, 0, self.kv_lora_rank], [1, 1, seq_len_local, self.kv_lora_rank + self.qk_rope_head_dim]
+        )
+        ttnn.deallocate(tt_kv)
+
+        tt_kv_nope = ttnn.rms_norm(
+            tt_kv_nope,
+            weight=self.kv_a_layernorm_weight,
+            epsilon=self.config.rms_norm_eps,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            compute_kernel_config=self.default_compute_kernel_config,
+        )
+
+        tt_kv_rope = ttnn.experimental.rotary_embedding_llama(
+            tt_kv_rope,
+            rope_tensors["cos_matrix"],
+            rope_tensors["sin_matrix"],
+            rope_tensors["trans_matrix"],
+            is_decode_mode=False,
+        )
+
+        # TODO: concat rope and nope, workaround remove with ttnn.narrow or fusion
+        tt_kvpe = ttnn.concat([tt_kv_nope, tt_kv_rope], dim=-1)
+        ttnn.deallocate(tt_kv_rope)
+        tt_kvpe = ttnn.typecast(tt_kvpe, dtype=ttnn.bfloat8_b)
+
+        # Zero the padding region of THIS layer's slot before fill so migration
+        # streams clean zeros (not residual data from a prior request) for the
+        # decode side.
+        if on_layer_complete is not None:
+            assert actual_isl is not None, "actual_isl required when on_layer_complete is set"
+            cache_seq_len_local = kvpe_cache.shape[2]
+            seq_len_total = cache_seq_len_local * self.sp_factor
+            zero_cache_padding_zigzag(
+                kvpe_cache=kvpe_cache[cache_layer_idx],
+                global_end_token=actual_isl,
+                sp_factor=self.sp_factor,
+                seq_len=seq_len_total,
+                decode_chunk_align=DECODE_CHUNK_ALIGN,
+                tp_factor=self.tp_factor,
+            )
+
+        ttnn.kv_cache.fill_cache_for_user_(kvpe_cache, tt_kvpe, cache_layer_idx)
+
+        if on_layer_complete is not None:
+            on_layer_complete(self.layer_idx)
+
+        return tt_kv_nope, tt_kvpe
