@@ -56,6 +56,7 @@ class ModelPipeline:
             weights_mode,
             lm_head_fp32_dest_acc_en,
             lm_head_persistent_mode,
+            num_mtp_levels > 0,
         )
         if not is_slow_dispatch():
             raise RuntimeError(
@@ -296,14 +297,24 @@ class ModelPipeline:
         def is_eos(token_id: int) -> bool:
             return eos_token_id is not None and token_id == eos_token_id
 
+        first_emit_time: float | None = None
+        last_emit_time: float | None = None
+
         def emit(token_id: int) -> None:
+            nonlocal first_emit_time, last_emit_time
             if on_token is not None:
                 on_token(token_id)
             generated_tokens.append(token_id)
+            now = time.time()
+            if first_emit_time is None:
+                first_emit_time = now
+            last_emit_time = now
 
+        prefill_start = time.time()
         pending: deque[DecodeResult] = deque(self.prefill_forward(prompt_token_ids))
+        prefill_end = time.time()
 
-        start_time = time.time()
+        decode_start = time.time()
         num_reads = 0
         num_writes = 0
         while len(generated_tokens) < max_new_tokens:
@@ -329,25 +340,42 @@ class ModelPipeline:
 
             self.model.write_input(
                 next_token,
-                -1,
-                0,
-                next_pos,
-                token_type=TokenType.BASE,
+                slot_id=0,
+                position_id=next_pos,
+                lane_id=0,
                 temperature=self.temperature,
                 top_k=self.top_k,
-                probability_mass_threshold=self.top_p,
+                top_p=self.top_p,
             )
             num_writes += 1
+
+        decode_end = time.time()
 
         while num_reads < num_writes:
             self.model.read_result()
             num_reads += 1
 
-        end_time = time.time()
-        elapsed = end_time - start_time
-        logger.debug(f"Time taken: {elapsed} seconds")
-        logger.debug(f"Tokens per second: {len(generated_tokens) / max(elapsed, 1e-9)}")
-        logger.debug("Base decode generation complete ({} tokens generated)", len(generated_tokens))
+        n_emitted = len(generated_tokens)
+        decode_elapsed = decode_end - decode_start
+        prefill_elapsed = prefill_end - prefill_start
+        ttft = (first_emit_time - prefill_start) if first_emit_time is not None else float("nan")
+        if first_emit_time is not None and last_emit_time is not None and n_emitted > 1:
+            tpot_elapsed = last_emit_time - first_emit_time
+            tps_steady = (n_emitted - 1) / max(tpot_elapsed, 1e-9)
+        else:
+            tps_steady = float("nan")
+        tps_avg = n_emitted / max(decode_elapsed, 1e-9)
+        logger.debug(
+            "Prefill: {:.2f}s ({} tokens, {:.1f} tok/s)",
+            prefill_elapsed,
+            len(prompt_token_ids),
+            len(prompt_token_ids) / max(prefill_elapsed, 1e-9),
+        )
+        logger.debug(f"TTFT (prefill + first decode token): {ttft:.3f}s")
+        logger.debug(f"Decode wall-time (excl. drain): {decode_elapsed:.2f}s")
+        logger.debug(f"Tokens per second (steady-state, inter-token): {tps_steady:.1f}")
+        logger.debug(f"Tokens per second (avg over decode loop): {tps_avg:.1f}")
+        logger.debug("Base decode generation complete ({} tokens generated)", n_emitted)
         return generated_tokens if return_generated_tokens else None
 
     def run_inference(
@@ -387,10 +415,18 @@ class ModelPipeline:
         def is_eos(token_id: int) -> bool:
             return eos_token_id is not None and token_id == eos_token_id
 
+        first_emit_time: float | None = None
+        last_emit_time: float | None = None
+
         def emit(token_id: int) -> None:
+            nonlocal first_emit_time, last_emit_time
             if on_token is not None:
                 on_token(token_id)
             generated_tokens.append(token_id)
+            now = time.time()
+            if first_emit_time is None:
+                first_emit_time = now
+            last_emit_time = now
             if token_id == think_open_id:
                 self._in_thinking_phase = True
             elif token_id == think_close_id:
@@ -400,14 +436,16 @@ class ModelPipeline:
             return bool(generated_tokens) and (is_eos(generated_tokens[-1]) or len(generated_tokens) >= max_new_tokens)
 
         # --- Prefill --------------------------------------------------------
+        prefill_start = time.time()
         prefill_results = self.prefill_forward(prompt_token_ids)
+        prefill_end = time.time()
         pending: deque[DecodeResult] = deque(prefill_results)
 
         tokens_per_cycle = 1 + self._num_mtp_levels
         depth_counts = [0] * tokens_per_cycle
         num_writes = 0
         num_reads = 0
-        start_time = time.time()
+        decode_start = time.time()
 
         def read_one() -> DecodeResult:
             nonlocal num_reads
@@ -423,6 +461,7 @@ class ModelPipeline:
         pivot = seed
 
         # --- Speculative decode loop ----------------------------------------
+        cycle_idx = 0
         while not finished():
             num_writes += self._write_spec_tokens(pivot)
 
@@ -436,7 +475,9 @@ class ModelPipeline:
                     break
             depth_counts[depth] += 1
 
+            emitted_this_cycle: list[int] = []
             for i in range(depth):
+                emitted_this_cycle.append(cycle_results[i].base_token)
                 emit(cycle_results[i].base_token)
                 if finished():
                     break
@@ -445,23 +486,45 @@ class ModelPipeline:
 
             pivot = cycle_results[depth]
             emit(pivot.base_token)
+            emitted_this_cycle.append(pivot.base_token)
             prev_chain = self._spec_chain(pivot)
+            cycle_idx += 1
+        decode_end = time.time()
 
         # Drain remaining in-flight results
         while num_reads < num_writes:
             self.model.read_result()
             num_reads += 1
 
-        elapsed = time.time() - start_time
+        n_emitted = len(generated_tokens)
+        decode_elapsed = decode_end - decode_start
+        # TTFT = prefill + time to first emitted decode token.
+        ttft = (first_emit_time - prefill_start) if first_emit_time is not None else float("nan")
+        # Steady-state inter-token throughput excludes the first emission.
+        if first_emit_time is not None and last_emit_time is not None and n_emitted > 1:
+            tpot_elapsed = last_emit_time - first_emit_time
+            tps_steady = (n_emitted - 1) / max(tpot_elapsed, 1e-9)
+        else:
+            tps_steady = float("nan")
+        tps_avg = n_emitted / max(decode_elapsed, 1e-9)
         total_cycles = sum(depth_counts)
-        logger.debug(f"Time taken: {elapsed:.2f}s")
-        logger.debug(f"Tokens per second: {len(generated_tokens) / elapsed:.1f}")
+        prefill_elapsed = prefill_end - prefill_start
+        logger.debug(
+            "Prefill: {:.2f}s ({} tokens, {:.1f} tok/s)",
+            prefill_elapsed,
+            len(prompt_token_ids),
+            len(prompt_token_ids) / max(prefill_elapsed, 1e-9),
+        )
+        logger.debug(f"TTFT (prefill + first decode token): {ttft:.3f}s")
+        logger.debug(f"Decode wall-time (excl. drain): {decode_elapsed:.2f}s")
+        logger.debug(f"Tokens per second (steady-state, inter-token): {tps_steady:.1f}")
+        logger.debug(f"Tokens per second (avg over decode loop): {tps_avg:.1f}")
         logger.debug(
             "Acceptance depth: {} ({} cycles)",
             ", ".join(f"d{i}={c}" for i, c in enumerate(depth_counts)),
             total_cycles,
         )
-        logger.debug("Generation complete ({} tokens generated)", len(generated_tokens))
+        logger.debug("Generation complete ({} tokens generated)", n_emitted)
         return generated_tokens if return_generated_tokens else None
 
     def barrier(self) -> None:

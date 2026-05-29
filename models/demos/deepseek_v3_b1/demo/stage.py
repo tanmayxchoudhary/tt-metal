@@ -197,7 +197,6 @@ class EmbeddingStage(StageKind):
         pipeline_config = ctx.pipeline_config
         if self._d2h_page_size is not None:
             size_to_payload = {
-                TOKEN_META_PAGE_SIZE_BYTES: PassthroughPayload.TOKEN,
                 TOKEN_META_PAGE_SIZE_BYTES: PassthroughPayload.TOKEN_META,
                 ACTIVATION_PAGE_SIZE_BYTES: PassthroughPayload.ACTIVATION,
                 ACTIVATION_W_TOKEN_META_PAGE_SIZE_BYTES: PassthroughPayload.ACTIVATION_W_TOKEN_META,
