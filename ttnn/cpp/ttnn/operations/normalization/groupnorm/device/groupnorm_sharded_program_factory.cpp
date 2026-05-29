@@ -356,10 +356,14 @@ tt::tt_metal::ProgramDescriptor GroupNormDeviceOperation::GroupNormShardedProgra
     // define core ranges
     bool use_mcast = num_cores_per_batch > 1 || num_cores_per_group > 1;
 
-    // create a vector of cores, in either RM or CM
+    // create a vector of cores, in either RM or CM (0-based indices, then shift to shard grid origin)
     std::vector<CoreCoord> core_coords =
         grid_to_cores(num_cores, num_cores_c, num_cores_r, shard_orientation == ShardOrientation::ROW_MAJOR);
-    for ([[maybe_unused]] const auto& core_coord : core_coords) {
+    const auto shard_bbox = a.shard_spec().value().grid.bounding_box();
+    const CoreCoord grid_offset = shard_bbox.start_coord;
+    for (auto& core_coord : core_coords) {
+        core_coord.x += grid_offset.x;
+        core_coord.y += grid_offset.y;
         log_debug(tt::LogOp, "worker coord: {} {}", core_coord.x, core_coord.y);
     }
     std::vector<std::vector<CoreCoord>> core_coords2D;
@@ -369,7 +373,8 @@ tt::tt_metal::ProgramDescriptor GroupNormDeviceOperation::GroupNormShardedProgra
                 std::vector<CoreCoord> temp;
                 temp.reserve(num_cores_per_group);
                 for (uint32_t k = 0; k < num_cores_per_group; ++k) {
-                    temp.push_back(CoreCoord{(std::size_t)(k + (i * num_cores_per_group)), (std::size_t)j});
+                    temp.push_back(CoreCoord{
+                        (std::size_t)(k + (i * num_cores_per_group)) + grid_offset.x, (std::size_t)j + grid_offset.y});
                 }
                 core_coords2D.push_back(temp);
             }
@@ -380,7 +385,8 @@ tt::tt_metal::ProgramDescriptor GroupNormDeviceOperation::GroupNormShardedProgra
                 std::vector<CoreCoord> temp;
                 temp.reserve(num_cores_per_group);
                 for (uint32_t k = 0; k < num_cores_per_group; ++k) {
-                    temp.push_back(CoreCoord{(std::size_t)j, (std::size_t)(k + (i * num_cores_per_group))});
+                    temp.push_back(CoreCoord{
+                        (std::size_t)j + grid_offset.x, (std::size_t)(k + (i * num_cores_per_group)) + grid_offset.y});
                 }
                 core_coords2D.push_back(temp);
             }

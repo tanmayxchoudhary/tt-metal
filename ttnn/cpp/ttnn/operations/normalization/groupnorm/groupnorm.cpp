@@ -15,6 +15,10 @@ namespace {
 using ttnn::operations::normalization::compute_num_virtual_cols;
 using ttnn::operations::normalization::find_expected_dram_grid;
 
+ttnn::CoreGrid core_grid_from_shard_bbox(const tt::tt_metal::CoreRange& bbox) {
+    return ttnn::CoreGrid(bbox.end_coord.x - bbox.start_coord.x + 1, bbox.end_coord.y - bbox.start_coord.y + 1);
+}
+
 // Validates that the requested core grid satisfies the DRAM group-norm constraints.
 // If the requested grid is invalid, fatals with an error suggesting the largest valid sub-grid.
 void validate_dram_grid(
@@ -258,14 +262,14 @@ Tensor group_norm(
             // rather than recomputing from scratch, so that program_config's
             // grid_size matches the cores where kernels are actually placed.
             const auto bbox = shard_spec_opt->grid.bounding_box();
-            core_grid = ttnn::CoreGrid(bbox.end_coord.x + 1, bbox.end_coord.y + 1);
+            core_grid = core_grid_from_shard_bbox(bbox);
         } else if (reciprocals.has_value() && reciprocals->is_sharded()) {
             // The reciprocals LUT is sharded on a specific grid; its length
             // encodes num_virtual_rows which must match the compute grid.
             // Infer the grid from the reciprocals tensor so the kernel sees a
             // consistent LUT.
             const auto bbox = reciprocals->shard_spec()->grid.bounding_box();
-            core_grid = ttnn::CoreGrid(bbox.end_coord.x + 1, bbox.end_coord.y + 1);
+            core_grid = core_grid_from_shard_bbox(bbox);
         } else {
             const auto dev_grid = input_tensor.device()->compute_with_storage_grid_size();
             auto dram_grid = ttnn::operations::normalization::find_expected_dram_grid(
@@ -315,8 +319,9 @@ Tensor group_norm(
         // Precondition above guarantees is_sharded() and shard_spec().has_value()
         // whenever reciprocals is provided.
         const auto recip_bbox = reciprocals->shard_spec()->grid.bounding_box();
-        const uint32_t recip_x = recip_bbox.end_coord.x + 1;
-        const uint32_t recip_y = recip_bbox.end_coord.y + 1;
+        const auto recip_core_grid = core_grid_from_shard_bbox(recip_bbox);
+        const uint32_t recip_x = recip_core_grid.x;
+        const uint32_t recip_y = recip_core_grid.y;
         TT_FATAL(
             recip_x == core_grid->x && recip_y == core_grid->y,
             "group_norm: reciprocals shard grid (x={}, y={}) must match the compute core_grid "
@@ -327,6 +332,22 @@ Tensor group_norm(
             recip_y,
             core_grid->x,
             core_grid->y);
+        // The non-sharded program factory places kernels at logical (0,0)-based cores, while
+        // the reciprocals CB is bound to the reciprocals buffer's per-core L1 banks. If the
+        // reciprocals are sharded at a non-zero origin and the input is not sharded (so the
+        // sharded factory's offset-shift does not apply), the CB and buffer disagree on which
+        // cores hold the LUT. Reject the combination explicitly; the sharded path handles
+        // offsets correctly via shard_spec().grid.bounding_box().start_coord.
+        if (!input_tensor.is_sharded()) {
+            const bool recip_at_origin = recip_bbox.start_coord.x == 0 && recip_bbox.start_coord.y == 0;
+            TT_FATAL(
+                recip_at_origin,
+                "group_norm: reciprocals sharded at non-zero origin (start_coord=({},{})) is not "
+                "supported with a non-sharded input. Either shard the input on the same grid as "
+                "the reciprocals or place the reciprocals at origin (0,0). Tracked in #43197.",
+                recip_bbox.start_coord.x,
+                recip_bbox.start_coord.y);
+        }
     }
 
     // For non-sharded DRAM tensors, validate that the requested core grid is not too
