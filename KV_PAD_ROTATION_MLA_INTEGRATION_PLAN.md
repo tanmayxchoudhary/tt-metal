@@ -13,25 +13,42 @@ into the MLA integration branch after validation.
 
 | Phase | Status |
 |---|---|
-| Phase 0 — Branch setup (op branch off main) | **Done** — on `ipotkonjak/kv_cache_per_chip_offset` |
-| Phase 1 — New op `update_padded_kv_cache` under `experimental/deepseek_prefill/` | **Done** — 23/23 tests passing (15 torch + 8 device on 2x4) |
-| Phase 1.5 — Tracy perf comparison vs legacy `fill_cache_for_user_` | **Blocked** — Tracy issue on bh-lb-10 box; needs re-run on another machine. Test functions exist in the test file. |
-| Phase 2 — MLA integration on `chunked_attn_mla_rotation` | **Not started** — waiting on perf sign-off |
-| Phase 3 — MLA chunked-rotated test | **Not started** |
-| Phase 4 — Regression sweep | **Not started** |
+| Phase 0 — Branch setup (op branch off main) | **Done** — on `ipotkonjak/kv_cache_per_chip_offset`, 3 commits |
+| Phase 1 — New op `update_padded_kv_cache` under `experimental/deepseek_prefill/` | **Done** — 32/32 tests passing (5 math + 10 torch + 17 device on 2x2 + 2x4) |
+| Phase 1.5 — Tracy perf comparison vs legacy `fill_cache_for_user_` | **Done on bh-qbae-07 (2x2)** — new op 14.5 µs/chip avg vs baseline 15.3 µs (~5% faster, within run-to-run noise). |
+| Phase 2 — MLA integration on `chunked_attn_mla_rotation` | **Unblocked — ready to start** |
+| Phase 3 — MLA chunked-rotated test | Not started |
+| Phase 4 — Regression sweep | Not started |
 
-### Approach changes from the original plan
-- Instead of modifying the production `ttnn.kv_cache.fill_cache_for_user_`
-  op, **forked it** into a new experimental op under
-  `ttnn/cpp/ttnn/operations/experimental/deepseek_prefill/update_padded_kv_cache/`.
-  This avoids touching a widely-used op and avoids cross-model approvals.
-- Used the **`ProgramDescriptor` + `create_descriptor(mesh_dispatch_coordinate)`**
-  pattern (same one `ring_joint_sdpa` uses). Lets per-chip `update_idxt` be
-  baked into per-device writer rt-args at host time; kernels themselves stay
-  the existing generic kv_cache reader + eltwise unary writer (no kernel forking).
-- Op name shipped: **`ttnn.experimental.deepseek_prefill.update_padded_kv_cache`**.
-  Signature: `(cache, input, batch_idx, kv_actual_global, cluster_axis)`. In-place;
-  returns a handle to `cache`.
+### Final op shape
+
+**`ttnn.experimental.deepseek_prefill.update_padded_kv_cache(cache, input, slot_idx, layer_idx, num_layers, kv_actual_global, cluster_axis)`**
+
+In-place; returns a handle to `cache`. Cache batch dim linearized users-outer,
+layers-inner: `batch_idx = slot_idx * num_layers + layer_idx`.
+
+### Approach choices that landed
+
+- **Forked the op** into `ttnn/cpp/ttnn/operations/experimental/deepseek_prefill/update_padded_kv_cache/`
+  instead of modifying production `ttnn.kv_cache.fill_cache_for_user_` — avoids
+  touching a widely-used op and avoids cross-model approvals.
+- **`ProgramDescriptor` + `create_descriptor(mesh_dispatch_coordinate)`** pattern,
+  same as `ring_joint_sdpa`. `apply_device_delay` and `dropout`'s
+  `DropoutMeshWorkloadFactory` are good minimal references.
+- **Writer kernel forked** into the op directory
+  (`device/kernels/dataflow/writer_update_padded_kv_cache.cpp`) so the
+  per-chip `update_idxt` math lives on-device. Common rt-args carry
+  `(kv_actual_global_t, my_sp_coord, sp_factor, chunk_local_t, slot_idx, layer_idx, num_layers, Wt, cache_HtWt, cache_CHtWt)`.
+  The reader kernel is still the generic `reader_fill_cache_interleaved_start_id.cpp`
+  — unchanged.
+- **Program-cache reuse across chunks**: `kv_actual_global`, `slot_idx`,
+  `layer_idx` are runtime args, NOT in the program hash. Only `num_layers` and
+  `cluster_axis` are hashed (structural). Verified by
+  `test_program_cache_reuse_across_kv_actual_global`: 4 successive calls with
+  different `kv_actual_global` add exactly 1 cache entry.
+- **`my_sp_coord` derivation** via `ccl::get_linearized_index_from_physical_coord`
+  (same helper ring_joint_sdpa uses). **`sp_factor`** derived by counting
+  distinct coords along `cluster_axis`. No `mesh_device*` in operation attributes.
 
 ## Source-of-truth branches
 
@@ -541,9 +558,12 @@ their corresponding spike passes.
 ## Implementation status (Phase 1) — what's actually on disk
 
 ### Branch
-`ipotkonjak/kv_cache_per_chip_offset` off `main` (`8635db0bafe`). All work
-listed below is uncommitted in the working tree — commit when perf sign-off
-on another machine confirms no regression vs legacy `fill_cache_for_user_`.
+`ipotkonjak/kv_cache_per_chip_offset` off `main` (`8635db0bafe`). Three
+commits land Phase 1:
+
+- `ae4ef53609e` — wip (initial scaffold)
+- `18aa72190df` — Move update_padded_kv_cache index math into the writer kernel
+- `b2fad4bfdf3` — Split batch_idx into slot_idx + layer_idx + num_layers
 
 ### New op files
 
@@ -551,11 +571,11 @@ on another machine confirms no regression vs legacy `fill_cache_for_user_`.
 ttnn/cpp/ttnn/operations/experimental/deepseek_prefill/update_padded_kv_cache/
 ├── CMakeLists.txt
 ├── sources.cmake
-├── update_padded_kv_cache.hpp / .cpp                # top-level functor
-├── update_padded_kv_cache_nanobind.hpp / .cpp       # python binding
+├── update_padded_kv_cache.hpp / .cpp                  # top-level functor
+├── update_padded_kv_cache_nanobind.hpp / .cpp         # python binding
 └── device/
-    └── update_padded_kv_cache_device_operation.hpp / .cpp
-                                                    # device op + create_descriptor
+    ├── update_padded_kv_cache_device_operation.hpp / .cpp   # op lifecycle + create_descriptor
+    └── kernels/dataflow/writer_update_padded_kv_cache.cpp   # forked writer w/ on-device idxt math
 ```
 
 Wired into:
@@ -565,14 +585,18 @@ Wired into:
 
 ### How the op works
 
-- Per-chip `update_idxt` computed inside `create_descriptor` from
-  `(kv_actual_global, my_sp_coord, sp_factor, chunk_local_tokens)`. Function
-  `update_idxt_for_chip` in `device/update_padded_kv_cache_device_operation.cpp:34`.
-- `my_sp_coord` derived via `ccl::get_linearized_index_from_physical_coord(cache_tensor, coord, cluster_axis)`. `sp_factor` derived by counting unique values along `cluster_axis` among `cache.device_storage().get_coords()`.
-- Per-core `cache_start_id` baked into writer rt-args. No `mesh_device*` held in attributes; the descriptor pattern provides `mesh_dispatch_coordinate` directly.
-- Reuses existing kernels (no fork):
-  - `ttnn/cpp/ttnn/operations/kv_cache/device/kernels/dataflow/reader_fill_cache_interleaved_start_id.cpp`
-  - `ttnn/cpp/ttnn/operations/eltwise/unary/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp`
+- **Host (`create_descriptor`)** computes `(my_sp_coord, sp_factor, kv_actual_global_t, ...)`
+  and packs them as **common runtime args** on the writer kernel — same on every
+  core of this chip. Per-core args are `(dst_addr, num_pages, core_blocks_written)`.
+- **Writer kernel** derives `update_idxt` per the per-chip math, composes
+  `batch_idx = slot_idx * num_layers + layer_idx`, computes
+  `start_id = batch_idx * cache_CHtWt + update_idxt * Wt + per-core offset`,
+  and writes its tiles. Reader stays generic.
+- **Program hash** only includes `num_layers`, `cluster_axis`, dtype, and
+  tensor shapes/memory-configs. `kv_actual_global`, `slot_idx`, `layer_idx`
+  are kernel rt-args — they refresh on cache-hit via
+  `apply_descriptor_runtime_args`, so successive MLA chunks reuse the
+  cached program.
 
 ### Test file
 
@@ -581,99 +605,82 @@ Wired into:
 Contains:
 - `test_update_padded_kv_cache_idxt_math` (5 unit cases) — direct math check.
 - `test_update_padded_kv_cache_torch_showcase` (10 scenarios) — pure-torch spec.
-- `test_update_padded_kv_cache_ttnn` (8 device scenarios on 2x4) — end-to-end.
+- `test_update_padded_kv_cache_ttnn` (8 device scenarios on `(2,4)` + `(2,2)` meshes; skip predicate filters sp_factor=4 cases on 2x2).
 - `test_perf_update_padded_kv_cache` (1 op call) — for tracy capture.
 - `test_perf_fill_cache_for_user_baseline` (1 op call) — for tracy capture.
+- `test_program_cache_reuse_across_kv_actual_global` — proves 4 calls with different
+  `kv_actual_global` share one cached program entry.
 
-Results so far on bh-lb-10 (8× p150b BH LoudBox):
-- Math + torch + device: **23/23 passing**. Total runtime ~8s.
+### Results (bh-lb-10 8× p150b LoudBox + bh-qbae-07 2x2 QuietBox)
+
+- **32 passed, 5 skipped** (the skipped 5 are sp_factor=4 device cases on 2x2 — correctly filtered by the skip predicate). ~14s wall time.
 
 ---
 
-## Phase 1.5 — Tracy perf comparison (pending re-run)
+## Phase 1.5 — Tracy perf comparison (DONE)
 
 ### Goal
 Confirm the new op's `DEVICE KERNEL DURATION [ns]` is not regressed vs the
 legacy `ttnn.kv_cache.fill_cache_for_user_` op, at MLA-realistic shapes.
 
-### Test shapes (both perf tests)
+### Test shapes
 
-- 2x4 mesh, `sp_axis=0` (sp=2).
 - Per-chip input: `[1, 1, chunk_local=2560, kvpe_dim=576]` bfloat16.
 - Per-chip cache: `[1, 1, 2*chunk_local=5120, kvpe_dim=576]` bfloat16.
 - Both tests call their op exactly once and `ttnn.synchronize_device`.
 
-### Status on bh-lb-10
-Tracy ran end-to-end but the device kernel duration columns in
-`ops_perf_results_*.csv` came back with absolute-timestamp-looking values
-(~3.24 × 10¹² ns ≈ ~54 min, clearly wrong) and empty `PER CORE MIN/MAX/AVG`
-fields. Suspected tracy/profiler issue specific to this box — **re-run
-on a different machine**.
+### Result on bh-qbae-07 (2x2 QuietBox)
 
-### How to re-run on another machine
+3 Tracy runs of `test_perf_update_padded_kv_cache` (kv_actual_global=2560,
+rotation kicks in) averaged **14.5 µs/chip** vs the legacy
+`fill_cache_for_user_` at **15.3 µs/chip**. **New op ~5% faster** —
+the extra `mul+add` the kernel does for `batch_idx` is within run-to-run
+noise. **Phase 2 green-lit.**
 
-From repo root, on this branch (`ipotkonjak/kv_cache_per_chip_offset`):
+### Note: Tracy on bh-lb-10 (8× p150b LoudBox)
+
+Tracy's CSV output on this specific box reports clearly-wrong duration
+values (~3.24 × 10¹² ns ≈ 54 min) and empty PER CORE MIN/MAX/AVG. Suspected
+box-specific issue; perf was measured on bh-qbae-07 instead. Not a blocker
+for the op itself.
+
+### How to re-run if needed
 
 ```bash
-# 1. Confirm everything builds.
 ./build_metal.sh
-
-# 2. Smoke-test the perf tests run cleanly (no tracy yet).
 source python_env/bin/activate
+
+# Sanity-run.
 python -m pytest \
   tests/ttnn/unit_tests/operations/deepseek/test_deepseek_prefill_update_padded_kv_cache.py::test_perf_update_padded_kv_cache \
   tests/ttnn/unit_tests/operations/deepseek/test_deepseek_prefill_update_padded_kv_cache.py::test_perf_fill_cache_for_user_baseline
 
-# 3. Profile the new op.
+# Profile.
 python tools/tracy/profile_this.py \
   -c "pytest tests/ttnn/unit_tests/operations/deepseek/test_deepseek_prefill_update_padded_kv_cache.py::test_perf_update_padded_kv_cache" \
   -n new_op
-
-# 4. Profile the baseline op.
 python tools/tracy/profile_this.py \
   -c "pytest tests/ttnn/unit_tests/operations/deepseek/test_deepseek_prefill_update_padded_kv_cache.py::test_perf_fill_cache_for_user_baseline" \
   -n baseline_op
 ```
 
-Each run produces a CSV at
-`generated/profiler/reports/<name>/<timestamp>/ops_perf_results_<name>_<timestamp>.csv`.
-
-### How to read the results
-
-In each CSV, filter `OP CODE` for the relevant op:
+CSV path: `generated/profiler/reports/<name>/<timestamp>/ops_perf_results_<name>_<timestamp>.csv`. Op codes:
 - New: `UpdatePaddedKvCacheDeviceOperation`
-- Baseline: `FillCacheMultiCoreProgramFactory` (or whichever op-code label
-  the legacy fill produces — the row is identifiable by being the only
-  kv-cache fill in the trace).
-
-Compare the `DEVICE KERNEL DURATION [ns]` column across the per-device rows
-(one row per chip; 8 rows on 2x4). Take the mean per op.
-
-### Decision rule
-
-- **New ≤ 1.1 × baseline**: green-light Phase 2.
-- **New > 1.1 × baseline**: investigate. Likely causes:
-  - Per-chip math overhead in the host (not the kernel; should be a wash).
-  - Different work-split path. Compare `num_blocks_per_core_*` between the
-    two factories — they should be identical at these shapes.
-  - Verify the writer kernel path is the same (`writer_unary_interleaved_start_id.cpp`)
-    and the reader path matches too.
-
-### Note on the baseline op signature
-
-On this branch (`main`-based), `ttnn.kv_cache.fill_cache_for_user_` takes
-**3 positional args** (cache, input, batch_index) and writes at offset 0 —
-no `update_idx` kwarg. The user's `chunked_attn_mla` branch adds the
-`update_idx` parameter; for the perf comparison we only need workload
-equivalence, not destination equivalence.
+- Baseline: `FillCacheMultiCoreProgramFactory` (the only kv-cache fill in the trace).
 
 ---
 
-## What to do after perf sign-off
+## What to do next
 
-1. Commit the Phase 1 work on `ipotkonjak/kv_cache_per_chip_offset`.
-2. Switch to `ipotkonjak/chunked_attn_mla_rotation` (create from
+1. Switch to `ipotkonjak/chunked_attn_mla_rotation` (create from
    `chunked_attn_mla` + merge `chunked_attn_tests`; see Phase 0 section above).
-3. Cherry-pick the Phase 1 commit(s).
-4. Proceed with Phase 2 (`MLA.forward` wiring) and Phase 3 (rotated MLA test)
-   as described above.
+2. **Cherry-pick** Phase 1 commits `ae4ef53609e`, `18aa72190df`, `b2fad4bfdf3`
+   from `ipotkonjak/kv_cache_per_chip_offset` (or just rebase them; the kv-cache
+   op work is self-contained).
+3. **Phase 2 (`MLA.forward` wiring)**: thread `kv_actual_isl` through; call
+   the new op from the chunked branch with `slot_idx=cache_user_id`,
+   `layer_idx=cache_layer_idx`, `num_layers=self.num_cache_layers` (derived
+   from the existing `cache_batch_idx = cache_user_id * num_cache_layers + cache_layer_idx`
+   pattern). Pass `kv_actual_isl` through to SDPA too with `logical_n = kv_actual_isl + chunk_size_global`.
+4. **Phase 3 (rotated MLA test)**: per the original test scope.
+5. **Phase 4 (regression sweep)**: as described in original Phase 4 section.
