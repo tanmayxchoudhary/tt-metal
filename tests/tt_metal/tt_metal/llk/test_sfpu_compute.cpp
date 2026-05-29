@@ -293,7 +293,7 @@ bool run_sfpu_all_same_buffer(
         .num_threads = 1,
         .dfb_bindings = {{
             .dfb_spec_name = IN_DFB,
-            .local_accessor_name = "out",
+            .accessor_name = "out",
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
@@ -316,7 +316,7 @@ bool run_sfpu_all_same_buffer(
         .num_threads = 1,
         .dfb_bindings = {{
             .dfb_spec_name = OUT_DFB,
-            .local_accessor_name = "in",
+            .accessor_name = "in",
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
@@ -346,13 +346,13 @@ bool run_sfpu_all_same_buffer(
         .dfb_bindings =
             {{
                  .dfb_spec_name = IN_DFB,
-                 .local_accessor_name = "in",
+                 .accessor_name = "in",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              },
              {
                  .dfb_spec_name = OUT_DFB,
-                 .local_accessor_name = "out",
+                 .accessor_name = "out",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
@@ -505,13 +505,13 @@ bool run_sfpu_binary_two_input_buffer(
         .dfb_bindings =
             {{
                  .dfb_spec_name = IN0_DFB,
-                 .local_accessor_name = "in0",
+                 .accessor_name = "in0",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              },
              {
                  .dfb_spec_name = IN1_DFB,
-                 .local_accessor_name = "in1",
+                 .accessor_name = "in1",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
@@ -535,7 +535,7 @@ bool run_sfpu_binary_two_input_buffer(
         .num_threads = 1,
         .dfb_bindings = {{
             .dfb_spec_name = OUT_DFB,
-            .local_accessor_name = "in",
+            .accessor_name = "in",
             .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
             .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
         }},
@@ -565,19 +565,19 @@ bool run_sfpu_binary_two_input_buffer(
         .dfb_bindings =
             {{
                  .dfb_spec_name = IN0_DFB,
-                 .local_accessor_name = "in0",
+                 .accessor_name = "in0",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              },
              {
                  .dfb_spec_name = IN1_DFB,
-                 .local_accessor_name = "in1",
+                 .accessor_name = "in1",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::CONSUMER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              },
              {
                  .dfb_spec_name = OUT_DFB,
-                 .local_accessor_name = "out",
+                 .accessor_name = "out",
                  .endpoint_type = experimental::metal2_host_api::KernelSpec::DFBEndpointType::PRODUCER,
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
