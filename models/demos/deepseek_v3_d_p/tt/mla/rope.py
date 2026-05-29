@@ -127,3 +127,112 @@ class RotarySetup:
         )
 
         return {"cos_matrix": cos_matrix, "sin_matrix": sin_matrix, "trans_matrix": trans_matrix}
+
+    def get_rope_tensors_rotated(self, chunk_size_global: int, kv_actual_isl: int) -> dict[str, ttnn.Tensor]:
+        """Get cos/sin/trans matrices for the KV-pad-aware rotated chunked path.
+
+        Each chip's rope shard is permuted so that the cos/sin row at chip-local
+        position `r` matches the global position of that chip's `r`-th Q row
+        after the server-side rotation. Mirrors the per-chip destination math in
+        ``ttnn.experimental.deepseek_prefill.update_padded_kv_cache``: pad-fill Q
+        rows come first (OLD-slab destination positions in global order), then
+        NEW-slab Q rows, then pad rows (rope values for pad rows are arbitrary —
+        their outputs are masked by SDPA's rotation logic).
+
+        Args:
+            chunk_size_global: global chunk size (one chunk's worth of tokens
+                across all sp devices). Per-chip seq = chunk_size_global // sp_factor.
+            kv_actual_isl: prior valid global KV length in tokens. Tile-aligned.
+                Constraints:
+                  * ``kv_actual_isl + chunk_size_global <= max_seq_len``
+                  * ``kv_actual_isl % TILE_SIZE == 0``
+                  * ``chunk_size_global % (TILE_SIZE * sp_factor) == 0``
+        """
+        assert not self.is_balanced, "rotated rope is incompatible with is_balanced"
+        sp = self.sp_factor
+        chunk_local = chunk_size_global // sp
+        end_global = kv_actual_isl + chunk_size_global
+        assert (
+            end_global <= self.hf_config.max_seq_len
+        ), f"kv_actual_isl + chunk_size_global ({end_global}) must be <= max_seq_len {self.hf_config.max_seq_len}"
+        assert kv_actual_isl % ttnn.TILE_SIZE == 0, f"kv_actual_isl ({kv_actual_isl}) must be tile-aligned"
+        assert (
+            chunk_size_global % (ttnn.TILE_SIZE * sp) == 0
+        ), f"chunk_size_global ({chunk_size_global}) must be a multiple of TILE_SIZE * sp ({ttnn.TILE_SIZE * sp})"
+
+        # Per-chip global positions for each Q row in chip-local write order.
+        # Mirrors update_padded_kv_cache's per-chip math + the server rotation
+        # (_kv_pad_rotation_layout in test_ring_joint_sdpa_handoff.py): pad-fill
+        # rows first (in global-position order across affected chips), then NEW
+        # slabs starting from chip 0.
+        old_capacity = sp * chunk_local
+        old_pad = max(0, old_capacity - kv_actual_isl)
+        new_actual_isl = chunk_size_global  # caller's chunk_size_global may include logical pad rows; rope values for them are don't-care
+        old_fill = min(old_pad, new_actual_isl)
+
+        # positions[c]: list of global positions for chip c's Q rows, in chip-local row order.
+        positions = [[0] * chunk_local for _ in range(sp)]
+        cursor = [0] * sp
+
+        # Phase 1: pad-fill in global-position order.
+        for i in range(old_fill):
+            gp = kv_actual_isl + i
+            chip = (gp // chunk_local) % sp
+            positions[chip][cursor[chip]] = gp
+            cursor[chip] += 1
+
+        # Phase 2: NEW-slab from chip 0 onward.
+        remaining = new_actual_isl - old_fill
+        token_idx = old_fill
+        chip = 0
+        while remaining > 0 and chip < sp:
+            gp = kv_actual_isl + token_idx
+            positions[chip][cursor[chip]] = gp
+            cursor[chip] += 1
+            token_idx += 1
+            remaining -= 1
+            if cursor[chip] == chunk_local:
+                chip += 1
+
+        # Trailing rows on any chip with cursor[c] < chunk_local are pad — rope
+        # values are don't-care, but we use 0 as a safe default so the indexed
+        # gather stays in-bounds.
+
+        cos_matrix_torch, sin_matrix_torch = get_cos_sin_matrix(self.hf_config)
+
+        # Build per-chip slices then concatenate in chip order. Sharding at dim 2
+        # along sp_axis then distributes them: rows [c*chunk_local, (c+1)*chunk_local)
+        # land on the c-th sp slice.
+        per_chip_cos = [cos_matrix_torch[..., positions[c], :] for c in range(sp)]
+        per_chip_sin = [sin_matrix_torch[..., positions[c], :] for c in range(sp)]
+        cos_matrix_torch = torch.cat(per_chip_cos, dim=2)
+        sin_matrix_torch = torch.cat(per_chip_sin, dim=2)
+
+        shard_dims = [None, None]
+        shard_dims[self.sp_axis] = 2
+
+        cos_matrix = ttnn.from_torch(
+            cos_matrix_torch,
+            device=self.mesh_device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ShardTensor2dMesh(self.mesh_device, dims=shard_dims, mesh_shape=self.mesh_device.shape),
+        )
+        sin_matrix = ttnn.from_torch(
+            sin_matrix_torch,
+            device=self.mesh_device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ShardTensor2dMesh(self.mesh_device, dims=shard_dims, mesh_shape=self.mesh_device.shape),
+        )
+
+        trans_mat_torch = get_rot_transformation_mat()
+        trans_matrix = ttnn.from_torch(
+            trans_mat_torch,
+            device=self.mesh_device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+        )
+
+        return {"cos_matrix": cos_matrix, "sin_matrix": sin_matrix, "trans_matrix": trans_matrix}
