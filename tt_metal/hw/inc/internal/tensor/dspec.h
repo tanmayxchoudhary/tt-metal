@@ -13,7 +13,9 @@
 
 #if defined(KERNEL_BUILD) || defined(FW_BUILD)
 // Forward declared from dataflow_api.h
-static uintptr_t get_common_arg_addr(int arg_idx);
+// Some paths call this but never define it. But the template is never
+// instantiated. This smells bad.
+/*static*/ uintptr_t get_common_arg_addr(int arg_idx);
 #else
 // In non-kernel/non-firmware builds, get_common_arg_addr is a stub that always returns 0U.
 // This is safe because the function should not be called in these builds; if it is, 0U is an invalid address
