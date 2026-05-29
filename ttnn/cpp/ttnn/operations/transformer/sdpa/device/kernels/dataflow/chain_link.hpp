@@ -8,8 +8,6 @@
 #include "api/dataflow/dataflow_api.h"
 #include "api/dataflow/noc.h"
 #include "api/dataflow/noc_semaphore.h"
-#include "api/dataflow/endpoints.h"
-#include "api/core_local_mem.h"
 
 /**
  * ChainConfig: Runtime args for store-and-forward chain configuration.
@@ -80,8 +78,12 @@ struct ChainConfig {
  * - mcast_enabled: selects multicast vs unicast forwarding at compile time
  * - is_head_level: true = head chain (matches batch AND head), false = batch chain (matches batch only)
  *
- * Constructor takes semaphore IDs (matching the new Semaphore<> API). For non-participating
- * cores the IDs are not used; the valid semaphore is only initialized when is_participant=true.
+ * Constructor takes semaphore IDs plus a Noc reference,
+ * and resolves L1 / NoC addresses once at construction so receive()/forward() can skip the
+ * per-hop re-derivation in the K/V mcast hot path.
+ *
+ * For non-participating cores the semaphores are not used; the valid semaphore is only
+ * initialized when is_participant=true.
  */
 template <bool mcast_enabled, bool is_head_level>
 class ChainLink {
@@ -97,6 +99,7 @@ public:
     const uint32_t next_core_q_chunks;
 
     ChainLink(
+        const Noc& noc,
         bool is_participant,
         bool is_injector,
         bool is_sink,
@@ -124,24 +127,28 @@ public:
         chain_batch(chain_batch),
         chain_head(chain_head),
         next_core_q_chunks(next_core_q_chunks),
-        sender_sem_id_(sender_sem_id),
-        receiver_sem_id_(receiver_sem_id),
-        valid_sem_id_(valid_sem_id),
-        signal_target_x_(signal_target_x),
-        signal_target_y_(signal_target_y),
-        next_core_x_(next_core_x),
-        next_core_y_(next_core_y),
-        mcast_start_x_(mcast_start_x),
-        mcast_start_y_(mcast_start_y),
-        mcast_end_x_(mcast_end_x),
-        mcast_end_y_(mcast_end_y),
+        noc_id_(noc.get_noc_id()),
+        sender_sem_l1_addr_(get_semaphore(sender_sem_id)),
+        receiver_sem_l1_addr_(get_semaphore(receiver_sem_id)),
+        valid_sem_l1_addr_(get_semaphore(valid_sem_id)),
+        sender_sem_noc_addr_(get_noc_addr(signal_target_x, signal_target_y, sender_sem_l1_addr_, noc_id_)),
+        receiver_sem_noc_addr_(
+            mcast_enabled ? uint64_t{0} : get_noc_addr(next_core_x, next_core_y, receiver_sem_l1_addr_, noc_id_)),
+        mcast_base_noc_addr_(
+            (mcast_enabled && is_injector)
+                ? get_noc_multicast_addr(mcast_start_x, mcast_start_y, mcast_end_x, mcast_end_y, 0u, noc_id_)
+                : uint64_t{0}),
+        mcast_sem_noc_addr_(
+            (mcast_enabled && is_injector) ? (mcast_base_noc_addr_ | receiver_sem_l1_addr_) : uint64_t{0}),
+        unicast_dst_base_x_(next_core_x),
+        unicast_dst_base_y_(next_core_y),
         sender_wait_count_((mcast_enabled && is_injector) ? mcast_sender_wait : 1),
         mcast_num_dests_(mcast_num_dests),
         chunk_tiles_(chunk_tiles),
         tile_bytes_(tile_bytes) {
         // Initialize valid semaphore (only meaningful for participants; non-participants leave it alone)
         if (is_participant) {
-            Semaphore<>(valid_sem_id_).set(VALID);
+            Semaphore<>(valid_sem_id).set(VALID);
         }
     }
 
@@ -196,13 +203,15 @@ public:
     /**
      * Receive data from upstream link (called by non-injector participants).
      * Protocol: signal sender that we're ready, then wait for data.
+     *
+     * The Noc parameter is kept for API parity; the runtime path uses noc_id_ captured at
+     * construction.
      */
-    void receive(const Noc& noc) const {
-        Semaphore<> receiver_sem(receiver_sem_id_);
-        receiver_sem.set(INVALID);
-        // Atomically increment the upstream sender's "ready" semaphore.
-        Semaphore<>(sender_sem_id_).up(noc, signal_target_x_, signal_target_y_, 1);
-        receiver_sem.wait(VALID);
+    void receive(const Noc& /*noc*/) const {
+        auto* receiver_sem_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(receiver_sem_l1_addr_);
+        noc_semaphore_set(receiver_sem_ptr, INVALID);
+        noc_semaphore_inc(sender_sem_noc_addr_, 1, noc_id_);
+        noc_semaphore_wait(receiver_sem_ptr, VALID);
     }
 
     /**
@@ -215,77 +224,57 @@ public:
     /**
      * Forward data to downstream link(s) with explicit size.
      * Use this when the data size differs from the default (e.g., K using head chain).
+     *
+     * Uses NoC/L1 addresses cached at construction. Drops to the underlying noc_async_* /
+     * noc_semaphore_* primitives.
      */
-    void forward(const Noc& noc, uint32_t cb_addr, uint32_t num_tiles, uint32_t tile_bytes) const {
-        Semaphore<> sender_sem(sender_sem_id_);
+    void forward(const Noc& /*noc*/, uint32_t cb_addr, uint32_t num_tiles, uint32_t tile_bytes) const {
+        auto* sender_sem_ptr = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(sender_sem_l1_addr_);
         if constexpr (mcast_enabled) {
-            sender_sem.wait(sender_wait_count_);
-            sender_sem.set(0);
-            MulticastEndpoint mcast_dst;
-            noc.async_write_multicast<Noc::McastMode::EXCLUDE_SRC>(
-                CoreLocalMem<uint32_t>(cb_addr),
-                mcast_dst,
+            noc_semaphore_wait(sender_sem_ptr, sender_wait_count_);
+            noc_semaphore_set(sender_sem_ptr, 0);
+            const uint64_t mcast_addr = mcast_base_noc_addr_ | cb_addr;
+            noc_async_write_multicast(
+                cb_addr,
+                mcast_addr,
                 num_tiles * tile_bytes,
                 mcast_num_dests_,
-                {},
-                {.noc_x_start = mcast_start_x_,
-                 .noc_y_start = mcast_start_y_,
-                 .noc_x_end = mcast_end_x_,
-                 .noc_y_end = mcast_end_y_,
-                 .addr = cb_addr},
-                true /* linked: companion semaphore mcast follows */);
+                true /* linked: companion semaphore mcast follows */,
+                noc_id_);
             // Companion semaphore mcast: write local valid_sem value into remote receiver_sem
-            // (different L1 offset). Semaphore<>::set_multicast assumes same L1 offset for
-            // source and destination, so we use the raw call here. Must be issued back-to-back
-            // after the linked write — inserting a flush between them deadlocks.
-            const uint64_t mcast_sem_noc_addr = ::get_noc_multicast_addr(
-                mcast_start_x_,
-                mcast_start_y_,
-                mcast_end_x_,
-                mcast_end_y_,
-                get_semaphore(receiver_sem_id_),
-                noc.get_noc_id());
-            noc_semaphore_set_multicast(
-                get_semaphore(valid_sem_id_), mcast_sem_noc_addr, mcast_num_dests_, false, noc.get_noc_id());
-            noc.async_writes_flushed();
+            // (different L1 offset). Must be issued back-to-back after the linked write —
+            // inserting a flush between them deadlocks.
+            noc_semaphore_set_multicast(valid_sem_l1_addr_, mcast_sem_noc_addr_, mcast_num_dests_, false, noc_id_);
+            noc_async_writes_flushed(noc_id_);
         } else {
-            sender_sem.wait(1);
-            sender_sem.set(0);
-            UnicastEndpoint unicast_dst;
-            noc.async_write(
-                CoreLocalMem<uint32_t>(cb_addr),
-                unicast_dst,
-                num_tiles * tile_bytes,
-                {},
-                {.noc_x = next_core_x_, .noc_y = next_core_y_, .addr = cb_addr});
-            noc.async_writes_flushed();
-            // Signal downstream: write the local "valid" semaphore value to the next core's
-            // receiver semaphore. Semaphores live at the same L1 offset across cores, so use
-            // the local addr derived from valid_sem_id_ as both the source and the remote target.
-            const uint32_t valid_sem_addr = get_semaphore(valid_sem_id_);
-            const uint64_t remote_receiver_noc_addr =
-                ::get_noc_addr(next_core_x_, next_core_y_, get_semaphore(receiver_sem_id_), noc.get_noc_id());
-            noc_semaphore_set_remote(valid_sem_addr, remote_receiver_noc_addr, noc.get_noc_id());
+            noc_semaphore_wait(sender_sem_ptr, 1);
+            noc_semaphore_set(sender_sem_ptr, 0);
+            // Data write — cb_addr varies per call, so encode here (coords cached).
+            const uint64_t unicast_addr = ::get_noc_addr(unicast_dst_base_x_, unicast_dst_base_y_, cb_addr, noc_id_);
+            noc_async_write(cb_addr, unicast_addr, num_tiles * tile_bytes, noc_id_);
+            noc_async_writes_flushed(noc_id_);
+            noc_semaphore_set_remote(valid_sem_l1_addr_, receiver_sem_noc_addr_, noc_id_);
         }
     }
 
 private:
-    // Semaphore IDs (resolved to L1 addresses on use via Semaphore<>)
-    uint32_t sender_sem_id_;
-    uint32_t receiver_sem_id_;
-    uint32_t valid_sem_id_;
+    // NoC index captured once so we don't re-read it from a passed-in Noc object per call.
+    uint8_t noc_id_;
 
-    // Remote coordinates
-    uint32_t signal_target_x_;
-    uint32_t signal_target_y_;
-    uint32_t next_core_x_;
-    uint32_t next_core_y_;
+    // Local L1 semaphore addresses (read directly via volatile pointer in receive/forward).
+    uint32_t sender_sem_l1_addr_;
+    uint32_t receiver_sem_l1_addr_;
+    uint32_t valid_sem_l1_addr_;
 
-    // Multicast rectangle (injector only)
-    uint32_t mcast_start_x_;
-    uint32_t mcast_start_y_;
-    uint32_t mcast_end_x_;
-    uint32_t mcast_end_y_;
+    // Precomputed NoC addresses (avoid get_noc_addr / get_noc_multicast_addr per hop).
+    uint64_t sender_sem_noc_addr_;    // Remote upstream sender semaphore (for noc_semaphore_inc).
+    uint64_t receiver_sem_noc_addr_;  // Remote downstream receiver semaphore (unicast only).
+    uint64_t mcast_base_noc_addr_;    // Multicast rectangle | 0 (injector only).
+    uint64_t mcast_sem_noc_addr_;     // mcast_base | receiver_sem_l1_addr_ (injector only).
+
+    // Unicast forward destination coords (the L1 addr varies per call, only coords are stable).
+    uint32_t unicast_dst_base_x_;
+    uint32_t unicast_dst_base_y_;
 
     // Configuration
     uint32_t sender_wait_count_;

@@ -134,6 +134,7 @@ void kernel_main() {
 
     // Head chain (head-level): matches (batch, head), used by V and optionally K
     ChainLink<head_mcast_enabled, true> head_chain(
+        noc,
         head_cfg.participates,
         head_cfg.is_injector,
         head_cfg.is_sink,
@@ -158,6 +159,7 @@ void kernel_main() {
 
     // Batch chain (batch-level): matches batch only, used by K when NHK == 1 (MLA mode)
     ChainLink<batch_mcast_enabled, false> batch_chain(
+        noc,
         batch_cfg.participates,
         batch_cfg.is_injector,
         batch_cfg.is_sink,
