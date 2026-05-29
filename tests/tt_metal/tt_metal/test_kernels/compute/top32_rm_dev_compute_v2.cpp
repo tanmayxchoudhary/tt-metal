@@ -8,14 +8,22 @@
 #include "api/compute/transpose_wh.h"
 #include "api/dataflow/circular_buffer.h"
 
-// DeepSeek Top32 headers (repo-relative; JIT adds -I only for this file's directory).
+// DeepSeek Top32 headers — Blackhole only; no WH B0 port exists yet.
 #if defined(TRISC_UNPACK)
+#if defined(ARCH_BLACKHOLE)
 #include "../../../../../models/demos/deepseek_v3_b1/kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_unpack_A_top32_rm_api.h"
+#else
+#error "top32_rm_dev_compute_v2: unsupported architecture (Blackhole only)"
+#endif
 #endif
 
 #if defined(TRISC_MATH)
+#if defined(ARCH_BLACKHOLE)
 #include "../../../../../models/demos/deepseek_v3_b1/kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/llk_math_deepseek_top32_rm.h"
 #include "../../../../../models/demos/deepseek_v3_b1/kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_math_top32_rm_api.h"
+#else
+#error "top32_rm_dev_compute_v2: unsupported architecture (Blackhole only)"
+#endif
 #endif
 
 void kernel_main() {
