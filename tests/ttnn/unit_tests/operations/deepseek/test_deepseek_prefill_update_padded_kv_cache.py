@@ -350,7 +350,7 @@ _DEVICE_IDS = [
 ]
 
 
-@pytest.mark.parametrize("mesh_device", [(2, 4)], ids=["2x4"], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(2, 4), (2, 2)], ids=["2x4", "2x2"], indirect=True)
 @pytest.mark.parametrize(
     "kv_actual_global, new_actual_isl, sp_factor, chunk_local, sp_axis",
     _DEVICE_SCENARIOS,
@@ -359,9 +359,8 @@ _DEVICE_IDS = [
 @pytest.mark.timeout(0)
 def test_update_padded_kv_cache_ttnn(mesh_device, kv_actual_global, new_actual_isl, sp_factor, chunk_local, sp_axis):
     """Device regression for ttnn.experimental.deepseek_prefill.update_padded_kv_cache."""
-    assert (
-        mesh_device.shape[sp_axis] == sp_factor
-    ), f"mesh sp_axis={sp_axis} has size {mesh_device.shape[sp_axis]}; expected {sp_factor}"
+    if mesh_device.shape[sp_axis] != sp_factor:
+        pytest.skip(f"mesh sp_axis={sp_axis} size {mesh_device.shape[sp_axis]} != scenario sp_factor {sp_factor}")
 
     dim = TILE_W  # 32; minimal tile-aligned head dim
     sentinel = -1.5  # distinguishable bfloat16 value
@@ -456,7 +455,7 @@ def _build_perf_inputs(mesh_device):
     return tt_cache, tt_input
 
 
-@pytest.mark.parametrize("mesh_device", [(2, 4)], ids=["2x4"], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(2, 4), (2, 2)], ids=["2x4", "2x2"], indirect=True)
 @pytest.mark.timeout(0)
 def test_perf_update_padded_kv_cache(mesh_device):
     """Single op invocation of the new per-chip-offset op for tracy capture."""
@@ -472,7 +471,7 @@ def test_perf_update_padded_kv_cache(mesh_device):
     ttnn.synchronize_device(mesh_device)
 
 
-@pytest.mark.parametrize("mesh_device", [(2, 4)], ids=["2x4"], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(2, 4), (2, 2)], ids=["2x4", "2x2"], indirect=True)
 @pytest.mark.timeout(0)
 def test_perf_fill_cache_for_user_baseline(mesh_device):
     """Single op invocation of the legacy uniform-offset op for tracy capture."""
@@ -481,3 +480,41 @@ def test_perf_fill_cache_for_user_baseline(mesh_device):
     # is identical to the new op's call (same chunk_local rows written per chip).
     ttnn.kv_cache.fill_cache_for_user_(tt_cache, tt_input, 0)
     ttnn.synchronize_device(mesh_device)
+
+
+@pytest.mark.parametrize("mesh_device", [(2, 4), (2, 2)], ids=["2x4", "2x2"], indirect=True)
+@pytest.mark.timeout(0)
+def test_program_cache_reuse_across_kv_actual_global(mesh_device):
+    """Successive calls with different kv_actual_global must share one cached program.
+
+    kv_actual_global, batch_idx are runtime args read by the writer kernel, so they're
+    intentionally omitted from compute_program_hash. cluster_axis IS in the hash because
+    it changes the structural meaning of sp_factor / my_sp_coord.
+    """
+    mesh_device.enable_program_cache()
+    tt_cache, tt_input = _build_perf_inputs(mesh_device)
+
+    baseline_entries = mesh_device.num_program_cache_entries()
+
+    # First call: cache miss → +1 entry.
+    ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+        tt_cache, tt_input, batch_idx=0, kv_actual_global=0, cluster_axis=_PERF_SP_AXIS
+    )
+    ttnn.synchronize_device(mesh_device)
+    after_first = mesh_device.num_program_cache_entries()
+    assert (
+        after_first == baseline_entries + 1
+    ), f"first call should add exactly one cache entry; got {after_first - baseline_entries}"
+
+    # Subsequent calls with different kv_actual_global / batch_idx must hit the same entry.
+    for kv_actual_global in (2560, 5120, 7680):
+        ttnn.experimental.deepseek_prefill.update_padded_kv_cache(
+            tt_cache, tt_input, batch_idx=0, kv_actual_global=kv_actual_global, cluster_axis=_PERF_SP_AXIS
+        )
+    ttnn.synchronize_device(mesh_device)
+
+    after_reuse = mesh_device.num_program_cache_entries()
+    assert after_reuse == after_first, (
+        f"successive calls with different kv_actual_global must reuse the cached program; "
+        f"got {after_reuse - after_first} extra cache entries"
+    )

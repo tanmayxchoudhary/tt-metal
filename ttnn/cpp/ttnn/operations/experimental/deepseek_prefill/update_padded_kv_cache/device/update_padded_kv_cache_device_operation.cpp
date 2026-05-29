@@ -22,37 +22,17 @@ using namespace tt::constants;
 
 namespace {
 
-// Reused from the original kv_cache fill path; these kernels take (addr, num_tiles, start_tile_id)
-// as runtime args and operate purely on tile ids — no per-device logic of their own.
+// Reader kernel is reused from the kv_cache fill path — purely (src_addr, num_tiles, src_start) rt-args.
+// Writer is a forked variant that derives `start_id` on-device from common rt-args so that
+// `batch_idx`, `kv_actual_global` and `cluster_axis` can stay out of the program hash.
 constexpr auto kReaderKernelPath =
     "ttnn/cpp/ttnn/operations/kv_cache/device/kernels/dataflow/reader_fill_cache_interleaved_start_id.cpp";
 constexpr auto kWriterKernelPath =
-    "ttnn/cpp/ttnn/operations/eltwise/unary/device/kernels/dataflow/writer_unary_interleaved_start_id.cpp";
+    "ttnn/cpp/ttnn/operations/experimental/deepseek_prefill/update_padded_kv_cache/device/kernels/dataflow/"
+    "writer_update_padded_kv_cache.cpp";
 
 constexpr uint32_t kSrcCbIndex = 0;
 constexpr uint32_t kNumInputTilesDoubleBuffered = 2;
-
-// Per-chip write-start tile (within the per-chip cache slot), derived from a single global token
-// count and this device's coord along the sp cluster axis. Mirrors `_update_idxt_for_chip` in
-// tests/ttnn/unit_tests/operations/deepseek/test_deepseek_prefill_update_padded_kv_cache.py.
-uint32_t update_idxt_for_chip(
-    uint32_t kv_actual_global, uint32_t my_sp_coord, uint32_t sp_factor, uint32_t chunk_local_tokens) {
-    const uint32_t kv_actual_t = kv_actual_global / TILE_HEIGHT;
-    const uint32_t chunk_local_t = chunk_local_tokens / TILE_HEIGHT;
-    const uint32_t chunk_global_t = sp_factor * chunk_local_t;
-
-    const uint32_t boundary_slab_idx = kv_actual_t / chunk_global_t;
-    const uint32_t boundary_chip = (kv_actual_t / chunk_local_t) % sp_factor;
-    const uint32_t boundary_offset_t = kv_actual_t % chunk_local_t;
-
-    if (my_sp_coord < boundary_chip) {
-        return (boundary_slab_idx + 1) * chunk_local_t;
-    }
-    if (my_sp_coord == boundary_chip) {
-        return boundary_slab_idx * chunk_local_t + boundary_offset_t;
-    }
-    return boundary_slab_idx * chunk_local_t;
-}
 
 // Count distinct values along the cluster axis among the participating devices to determine
 // sp_factor without round-tripping to the mesh view.
@@ -135,11 +115,14 @@ UpdatePaddedKvCacheDeviceOperation::tensor_return_value_t UpdatePaddedKvCacheDev
 
 ttsl::hash::hash_t UpdatePaddedKvCacheDeviceOperation::compute_program_hash(
     const operation_attributes_t& args, const tensor_args_t& tensor_args) {
+    // batch_idx and kv_actual_global are runtime args read by the writer kernel — kept OUT
+    // of the hash so successive chunks reuse the cached program; rt-args refresh on cache hits
+    // via apply_descriptor_runtime_args. cluster_axis stays IN the hash: it determines which
+    // mesh dim is sp, which changes the structural meaning of sp_factor / my_sp_coord — a
+    // structural property, not a per-call data value.
     const auto& cache = tensor_args.cache;
     const auto& input = tensor_args.input;
     return tt::tt_metal::operation::hash_operation<UpdatePaddedKvCacheDeviceOperation>(
-        args.batch_idx,
-        args.kv_actual_global,
         args.cluster_axis,
         input.dtype(),
         input.memory_config(),
@@ -173,11 +156,10 @@ tt::tt_metal::ProgramDescriptor UpdatePaddedKvCacheDeviceOperation::ProgramFacto
     const uint32_t cache_HtWt = cache_shape[-2] * Wt / TILE_HEIGHT;
     const uint32_t cache_CHtWt = cache_shape[1] * cache_HtWt;
 
-    // Per-chip update_idxt math: derive sp_factor + my_sp_coord, then compute.
+    // Per-chip kernel inputs: kernel does the update_idxt + start_id math itself from these.
     const uint32_t sp_factor = sp_factor_for_tensor(cache, args.cluster_axis);
     const uint32_t my_sp_coord = ::ttnn::ccl::get_linearized_index_from_physical_coord(cache, coord, args.cluster_axis);
-    const uint32_t update_idxt = update_idxt_for_chip(args.kv_actual_global, my_sp_coord, sp_factor, input_shape[-2]);
-    const uint32_t start_idx = (args.batch_idx * cache_CHtWt) + (update_idxt * Wt);
+    const uint32_t kv_actual_global_t = args.kv_actual_global / TILE_HEIGHT;
 
     // Work split: one tile per "block". num_blocks_of_work = input_C * input_Ht (= num_heads * seq_tiles).
     const uint32_t num_blocks_of_work = input_shape[1] * input_Ht;
@@ -221,7 +203,19 @@ tt::tt_metal::ProgramDescriptor UpdatePaddedKvCacheDeviceOperation::ProgramFacto
     writer_kernel.compile_time_args = std::move(writer_compile_args);
     writer_kernel.config = WriterConfigDescriptor{};
 
-    // Per-core runtime args (mirrors the original fill_cache work-split scheme).
+    // Common rt-args: per-chip kernel inputs for on-device update_idxt + start_id derivation.
+    writer_kernel.emplace_common_runtime_args({
+        kv_actual_global_t,
+        my_sp_coord,
+        sp_factor,
+        input_Ht,
+        args.batch_idx,
+        Wt,
+        cache_HtWt,
+        cache_CHtWt,
+    });
+
+    // Per-core runtime args.
     auto* src_buffer = input.buffer();
     auto* dst_buffer = cache.buffer();
     const uint32_t g1_numcores = core_group_1.num_cores();
@@ -244,15 +238,13 @@ tt::tt_metal::ProgramDescriptor UpdatePaddedKvCacheDeviceOperation::ProgramFacto
                 num_blocks_written * Wt,
             });
 
-        // Writer: (dst_addr, num_tiles, dst_start_tile_id)
-        const uint32_t cache_start_id =
-            start_idx + (num_blocks_written / input_Ht * cache_HtWt) + ((num_blocks_written % input_Ht) * Wt);
+        // Writer: (dst_addr, num_pages, core_blocks_written) — kernel adds update_idxt+head offset itself.
         writer_kernel.runtime_args.emplace_back(
             core,
             KernelDescriptor::CoreRuntimeArgs{
                 dst_buffer->address(),
                 num_blocks_per_core * Wt,
-                cache_start_id,
+                num_blocks_written,
             });
 
         num_blocks_written += num_blocks_per_core;
