@@ -41,43 +41,43 @@ The initial release of the 3-tier model CI includes models owned by the models-t
 | Model | Systems |
 |-------|---------|
 | Llama3.1-8B | WH N150, BH P150 |
-| Llama3.1-8B-DP-Galaxy | WH Galaxy perf |
-| Llama3.3-70B-Galaxy | WH Galaxy perf |
-| Qwen3-32B-Galaxy | WH Galaxy perf |
-| GPT-OSS 120B | WH Galaxy perf, BH Galaxy perf, BH QuietBox 2 |
+| Llama3.1-8B-DP-Galaxy | WH Galaxy |
+| Llama3.3-70B-Galaxy | WH Galaxy |
+| Qwen3-32B-Galaxy | WH Galaxy |
+| GPT-OSS 120B | WH Galaxy, BH Galaxy, BH QuietBox 2 |
 | Whisper | WH N150, BH P150 |
 ## Tier 2 Models
 | Model | Systems |
 |-------|---------|
-| GPT-OSS 20B | WH LLMBox perf, BH P150, BH LoudBox, BH QuietBox 2 |
-| Llama3.1-8B | WH LLMBox perf, BH LoudBox, BH QuietBox 2 |
-| Llama3.1-8B-DP | WH LLMBox perf |
-| Llama3.3-70B | WH LLMBox perf, BH LLMBox, BH LoudBox, BH QuietBox 2 |
-| Qwen3-32B | WH LLMBox perf, BH LLMBox, BH LoudBox, BH QuietBox 2 |
-| Qwen2.5-32B | WH LLMBox perf, BH LoudBox |
-| Qwen2.5-Coder-32B | WH LLMBox perf |
-| Qwen2.5-72B-VL | WH LLMBox perf, BH LoudBox |
-| Llama90B-VL | WH LLMBox perf |
-| Shallow-UNet | WH N150, WH LLMBox perf |
+| GPT-OSS 20B | WH LLMBox, BH P150, BH LoudBox, BH QuietBox 2 |
+| Llama3.1-8B | WH LLMBox, BH LoudBox, BH QuietBox 2 |
+| Llama3.1-8B-DP | WH LLMBox |
+| Llama3.3-70B | WH LLMBox, BH LLMBox, BH LoudBox, BH QuietBox 2 |
+| Qwen3-32B | WH LLMBox, BH LLMBox, BH LoudBox, BH QuietBox 2 |
+| Qwen2.5-32B | WH LLMBox, BH LoudBox |
+| Qwen2.5-Coder-32B | WH LLMBox |
+| Qwen2.5-72B-VL | WH LLMBox, BH LoudBox |
+| Llama90B-VL | WH LLMBox |
+| Shallow-UNet | WH N150, WH LLMBox |
 | Mistral-7B | WH N150 |
-| Mixtral-8x7B | WH LLMBox perf |
+| Mixtral-8x7B | WH LLMBox |
 | Gemma-3-4B | WH N150 |
-| Gemma-3-27B | WH LLMBox perf |
+| Gemma-3-27B | WH LLMBox |
 | Gemma-4-E2B | WH N150 |
 | Gemma-4-E4B | WH N150 |
-| Gemma-4-26B-A4B | WH LLMBox perf |
-| Gemma-4-31B | WH LLMBox perf |
+| Gemma-4-26B-A4B | WH LLMBox |
+| Gemma-4-31B | WH LLMBox |
 ## Tier 3 Models
 | Model | Systems |
 |-------|---------|
 | Falcon-7B | WH N150 |
-| Falcon-40B | WH LLMBox perf |
+| Falcon-40B | WH LLMBox |
 | Llama3.2-1B | WH N150 |
 | Llama3.2-3B | WH N150 |
-| Llama3.2-11B-Vision | WH LLMBox perf |
-| QwQ-32B | WH LLMBox perf |
+| Llama3.2-11B-Vision | WH LLMBox |
+| QwQ-32B | WH LLMBox |
 | Qwen2.5-7B | WH N300 |
-| Qwen2.5-VL-32B | WH LLMBox perf, BH LoudBox |
+| Qwen2.5-VL-32B | WH LLMBox, BH LoudBox |
 | Phi-3-mini | WH N150 |
 
 
