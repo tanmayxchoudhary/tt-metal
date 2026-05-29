@@ -217,11 +217,6 @@ constexpr uint32_t stream_width = MEM_WORD_ADDR_WIDTH;
 volatile uint32_t last_event;
 }
 
-
-static GoSignalState go_signal_state_ring_buf[4];
-static uint8_t go_signal_state_wr_ptr = 0;
-static uint8_t go_signal_state_rd_ptr = 0;
-
 static uint32_t go_signal_noc_data[max_num_go_signal_noc_data_entries];
 
 FORCE_INLINE volatile uint32_t* get_cq_completion_read_ptr() {
@@ -637,7 +632,6 @@ void process_write_packed(uint32_t flags, uint32_t* l1_cache) {
         (flags & CQ_DISPATCH_CMD_PACKED_WRITE_FLAG_NO_STRIDE) ? 0 : round_up_pow2(xfer_size, L1_ALIGNMENT);
     ASSERT(stride != 0 || data_ptr - cmd_ptr + xfer_size <= dispatch_cb_page_size);
 
-    volatile uint32_t tt_l1_ptr* l1_addr = (uint32_t*)(cmd_ptr + sizeof(CQDispatchCmd));
     cq_noc_async_write_init_state<CQ_NOC_snDL, mcast>(0, dst_addr, xfer_size);
 
     // DPRINT("dispatch_write_packed: xfer_size {} stride {} data_ptr 0x{:08x} count {} dst_addr 0x{:08x}\n",
