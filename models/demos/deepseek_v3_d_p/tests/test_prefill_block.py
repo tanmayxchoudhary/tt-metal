@@ -23,7 +23,7 @@ from models.common.utility_functions import profiler
 from models.demos.deepseek_v3.demo.demo import load_prompts_from_json
 from models.demos.deepseek_v3_d_p.reference.deepseek_v3_config import DeepSeekV3Config
 from models.demos.deepseek_v3_d_p.tt.mla.rope import RotarySetup
-from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config
+from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config, get_max_payload_size
 from models.demos.deepseek_v3_d_p.tt.moe.tt_moe_gate_prefill import GateComputeMode
 from models.demos.deepseek_v3_d_p.tt.tt_prefill_block import TtPrefillBlock
 from models.demos.deepseek_v3_d_p.utils.fast_cache_checker import init_checker
@@ -67,8 +67,9 @@ PCC_THRESHOLD_KVPE = 0.999
         pytest.param(
             (2, 4),
             {
-                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
-                "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+                "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
             },
             1,
             ttnn.Topology.Linear,
@@ -78,13 +79,49 @@ PCC_THRESHOLD_KVPE = 0.999
         pytest.param(
             (8, 4),
             {
-                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
-                "fabric_router_config": create_fabric_router_config(max_payload_size=DeepSeekV3Config.EMB_SIZE),
+                "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+                "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
             },
             2,
             ttnn.Topology.Linear,
             marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
             id="mesh-8x4",
+        ),
+        # FABRIC_1D fallback variants for local comparison. CI runs only FABRIC_2D (the entries above);
+        # tighten the CI -k filter to "and not 1d-" if needed.
+        pytest.param(
+            (2, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+            },
+            1,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(2, 4), topology="mesh-2x4"),
+            id="1d-mesh-2x4",
+        ),
+        pytest.param(
+            (8, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+            },
+            2,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
+            id="1d-mesh-8x4-line",
+        ),
+        pytest.param(
+            (8, 4),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+            },
+            2,
+            ttnn.Topology.Ring,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(8, 4), topology="mesh-8x4"),
+            id="1d-mesh-8x4-ring",
         ),
     ],
     indirect=["mesh_device", "device_params"],
@@ -257,7 +294,6 @@ def test_prefill_block(
         sp_axis=sp_axis,
         tp_axis=tp_axis,
         weight_cache_path=cache_dir,
-        capacity_factor=32,
         is_balanced=is_balanced,
     )
     if gate_fallback_mode is not None:

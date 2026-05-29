@@ -24,6 +24,7 @@ from models.demos.deepseek_v3_d_p.tt.mla.utils import (
     reorder_tensor_chunks,
     reverse_reorder_tensor_chunks,
 )
+from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config, get_max_payload_size
 from models.demos.deepseek_v3_d_p.utils.kv_cache_utils import init_kvpe_cache
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
@@ -136,8 +137,14 @@ def run_mla_inference(
             "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING,
             "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
         },
+        {
+            "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+            "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+            "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+            "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+        },
     ],
-    ids=["line", "ring"],
+    ids=["line", "ring", "fabric2d"],
     indirect=True,
 )
 @pytest.mark.parametrize("use_pretrained", [False, True], ids=["random", "pretrained"])

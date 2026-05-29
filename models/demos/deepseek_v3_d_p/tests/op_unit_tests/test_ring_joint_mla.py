@@ -14,6 +14,7 @@ from models.demos.deepseek_v3_d_p.tt.mla.utils import (
     reorder_tensor_chunks,
     reverse_reorder_tensor_chunks,
 )
+from models.demos.deepseek_v3_d_p.tt.moe.init_helpers import create_fabric_router_config, get_max_payload_size
 from models.tt_dit.utils.padding import get_padded_vision_seq_len
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_pcc
 from tests.ttnn.unit_tests.operations.sdpa.sdpa_test_utils import fa_rand
@@ -491,10 +492,21 @@ def run_ring_joint_sdpa(
             },
             ttnn.Topology.Linear,
         ),
+        (
+            {
+                "trace_region_size": 1000000,
+                "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+                "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+            },
+            ttnn.Topology.Linear,
+        ),
     ],
     indirect=["device_params"],
     ids=[
         "line",
+        "fabric2d",
     ],
 )
 @pytest.mark.parametrize(
@@ -868,9 +880,18 @@ def run_ring_joint_sdpa_perf(
             },
             ttnn.Topology.Ring,
         ),
+        (
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+                "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+                "worker_l1_size": ttnn._ttnn.device.DEFAULT_WORKER_L1_SIZE if is_blackhole() else 1344544,
+            },
+            ttnn.Topology.Linear,
+        ),
     ],
     indirect=["device_params"],
-    ids=["line", "ring"],
+    ids=["line", "ring", "fabric2d"],
 )
 @pytest.mark.parametrize(
     "mesh_device",
