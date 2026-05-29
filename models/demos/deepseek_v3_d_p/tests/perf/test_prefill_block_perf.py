@@ -62,38 +62,37 @@ _TEST_PATH = "models/demos/deepseek_v3_d_p/tests/test_prefill_block_loop.py"
             0.03,
             "2x4_layer3_moe_real_weights_2link",
         ),
-        # FABRIC_2D variants — paired with the 1D entries above for direct comparison.
-        # Initial expected_device_perf_ns_per_iteration is set to the 1D baseline with a
-        # wide 0.5 margin so the first run won't fail; the goal is to read the measured
-        # kernel duration from the run output and tighten margins after calibration.
+        # FABRIC_2D variants. The layer3 MoE entry has been calibrated against a real run on
+        # BH Galaxy (~149.6 ms measured); the other two are still uncalibrated placeholders
+        # with a wide margin so the first run will pass and surface the measured number.
         (
             f"pytest {_TEST_PATH} -k 'fabric2d-mesh-8x4 and layer0 and gate_device and no_ref and isl_25k'",
-            20_680_586,
+            20_680_586,  # TODO: tighten after calibration run on bh_galaxy (currently the 1D baseline)
             "deepseek_v3_prefill_block",
             "deepseek_v3_prefill_block_8x4_layer0_dense_fabric2d",
             1,
             1,
-            0.5,
+            0.5,  # TODO: tighten after calibration run
             "glx_8x4_layer0_dense_real_weights_fabric2d",
         ),
         (
             f"pytest {_TEST_PATH} -k 'fabric2d-mesh-8x4 and layer3 and gate_device and no_ref and isl_25k'",
-            135_652_561,
+            149_622_747,  # Calibrated: measured on BH Galaxy 8x4, 2026-05-29 (FABRIC_2D ~10% slower than 1D).
             "deepseek_v3_prefill_block",
             "deepseek_v3_prefill_block_8x4_layer3_moe_fabric2d",
             1,
             1,
-            0.5,
+            0.03,
             "glx_8x4_layer3_moe_real_weights_fabric2d",
         ),
         (
             f"pytest {_TEST_PATH} -k 'fabric2d-mesh-2x4 and layer3 and gate_device and no_ref and isl_6k4'",
-            111_723_744,
+            111_723_744,  # TODO: tighten after calibration run on bh_loudbox (currently the 1D baseline)
             "deepseek_v3_prefill_block",
             "deepseek_v3_prefill_block_2x4_layer3_moe_fabric2d",
             1,
             1,
-            0.5,
+            0.5,  # TODO: tighten after calibration run
             "2x4_layer3_moe_real_weights_fabric2d",
         ),
     ],
