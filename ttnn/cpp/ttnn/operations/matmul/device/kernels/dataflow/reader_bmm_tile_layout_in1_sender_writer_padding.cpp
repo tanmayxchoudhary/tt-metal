@@ -144,7 +144,7 @@ void kernel_main() {
 
 // RT and COMPILE TIME ARGS for DRAM sharded weights
 #ifdef IN1_DRAM_WIDTH_SHARDED
-    const uint32_t vc = get_arg_val<uint32_t>(rt_args_idx++);
+    const uint8_t vc = static_cast<uint8_t>(get_arg_val<uint32_t>(rt_args_idx++));
     const uint32_t num_dram_shards_to_read = get_arg_val<uint32_t>(rt_args_idx++);
     const uint32_t dram_tensor_start_offset = get_arg_val<uint32_t>(rt_args_idx++);
     tt_l1_ptr uint32_t* in1_block_w_dram_stride_bytes = (tt_l1_ptr uint32_t*)get_arg_addr(rt_args_idx++);
@@ -297,11 +297,11 @@ void kernel_main() {
                             if (i == 0) {
                                 shard_base_addr += dram_tensor_start_offset;
                             }
-                            noc.set_async_read_state<Noc::VcSelection::CUSTOM, NOC_MAX_BURST_SIZE>(
+                            noc.set_async_read_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
                                 dram_bank,
                                 in1_single_tile_size_bytes,
                                 {.bank_id = shard_bank_id, .addr = shard_base_addr},
-                                vc);
+                                NocOptVals{.vc = vc});
 
                             uint32_t l1_read_addr_in1 = l1_read_addr_in1_offset;
                             uint32_t l1_write_addr_in1 = cb_in1.get_write_ptr() + l1_write_addr_in1_offset;
@@ -314,14 +314,14 @@ void kernel_main() {
                                 uint32_t l1_write_addr_in1_temp = l1_write_addr_in1;
                                 for (uint32_t w = 0; w < in1_block_w_dram; ++w) {
                                     noc.async_read_with_state<
-                                        Noc::VcSelection::CUSTOM,
+                                        NocOptions::CUSTOM_VC,
                                         NOC_MAX_BURST_SIZE>(
                                         dram_bank,
                                         CoreLocalMem<uint32_t>(l1_write_addr_in1_temp),
                                         in1_single_tile_size_bytes,
                                         {.bank_id = shard_bank_id, .addr = shard_base_addr + l1_read_addr_in1_temp},
                                         {},
-                                        vc);
+                                        NocOptVals{.vc = vc});
                                     l1_read_addr_in1_temp += in1_single_tile_size_bytes;
                                     l1_write_addr_in1_temp += in1_single_tile_size_bytes;
                                 }
@@ -498,11 +498,11 @@ void kernel_main() {
                                                         bias_single_tile_size_bytes;
                             }
 
-                            noc.set_async_read_state<Noc::VcSelection::CUSTOM, NOC_MAX_BURST_SIZE>(
+                            noc.set_async_read_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
                                 bias_dram_bank,
                                 bias_single_tile_size_bytes,
                                 {.bank_id = bias_shard_bank_id, .addr = bias_shard_base_addr},
-                                vc);
+                                NocOptVals{.vc = vc});
 
                             uint32_t l1_read_addr_in3 = 0;
                             l1_write_addr_in3 = cb_in3.get_write_ptr() + l1_write_addr_in3_offset;
@@ -513,13 +513,13 @@ void kernel_main() {
                                 in1_single_tile_size_bytes;
 
                             for (uint32_t w = 0; w < in3_block_w_dram; ++w) {
-                                noc.async_read_with_state<Noc::VcSelection::CUSTOM, NOC_MAX_BURST_SIZE>(
+                                noc.async_read_with_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
                                     bias_dram_bank,
                                     CoreLocalMem<uint32_t>(l1_write_addr_in3),
                                     bias_single_tile_size_bytes,
                                     {.bank_id = bias_shard_bank_id, .addr = bias_shard_base_addr + l1_read_addr_in3},
                                     {},
-                                    vc);
+                                    NocOptVals{.vc = vc});
                                 l1_read_addr_in3 += bias_single_tile_size_bytes;
                                 l1_write_addr_in3 += bias_single_tile_size_bytes;
                                 in3_block_size_bytes += bias_single_tile_size_bytes;

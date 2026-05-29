@@ -97,12 +97,12 @@ void kernel_main() {
     const uint32_t in1_tensor_addr = get_arg_val<uint32_t>(rt_args_idx++);
     const uint32_t ring_idx = get_arg_val<uint32_t>(rt_args_idx++);
     uint32_t dram_bank_id = 0;
-    uint32_t vc = 0;
+    uint8_t vc = 0;
     uint32_t dram_read_offset = 0;
 
     if constexpr (in1_is_dram_sharded) {
         dram_bank_id = get_arg_val<uint32_t>(rt_args_idx++);
-        vc = get_arg_val<uint32_t>(rt_args_idx++);
+        vc = static_cast<uint8_t>(get_arg_val<uint32_t>(rt_args_idx++));
         dram_read_offset = get_arg_val<uint32_t>(rt_args_idx++);
     }
 
@@ -176,15 +176,16 @@ void kernel_main() {
                     for (uint32_t w = 0; w < in1_block_width_num_pages; ++w) {
                         uint32_t curr_page_size =
                             w == in1_block_width_num_pages - 1 ? in1_block_page_size_last : in1_block_page_size;
-                        noc.set_async_read_state<Noc::VcSelection::CUSTOM, NOC_MAX_BURST_SIZE>(
-                            dram_bank, curr_page_size, {.bank_id = dram_bank_id, .addr = in1_tensor_addr}, vc);
-                        noc.async_read_with_state<Noc::VcSelection::CUSTOM, NOC_MAX_BURST_SIZE>(
+                        noc.set_async_read_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
+                            dram_bank, curr_page_size, {.bank_id = dram_bank_id, .addr = in1_tensor_addr},
+                            NocOptVals{.vc = vc});
+                        noc.async_read_with_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
                             dram_bank,
                             CoreLocalMem<uint32_t>(l1_write_addr_in1),
                             curr_page_size,
                             {.bank_id = dram_bank_id, .addr = in1_tensor_addr + curr_l1_read_addr_in1},
                             {},
-                            vc);
+                            NocOptVals{.vc = vc});
                         curr_l1_read_addr_in1 += curr_page_size;
                         l1_write_addr_in1 += curr_page_size;
                     }

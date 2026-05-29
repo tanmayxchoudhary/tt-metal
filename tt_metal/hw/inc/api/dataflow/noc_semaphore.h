@@ -121,9 +121,10 @@ public:
      * @param noc_y_end The ending Y coordinate of the region (inclusive).
      * @param num_dests The number of destination cores in the region.
      * @param linked Whether to link this operation with the next (default is false).
-     * @tparam mcast_mode Indicates whether to include the sender in the multicast (default is EXCLUDE_SRC)
+     * @tparam opts NocOptions flags; set NocOptions::MCAST_INCL_SRC to include the sender in the multicast
+     *             (default is NocOptions::DEFAULT which excludes sender)
      */
-    template <Noc::McastMode mcast_mode = Noc::McastMode::EXCLUDE_SRC>
+    template <NocOptions opts = NocOptions::DEFAULT>
     void set_multicast(
         const Noc& noc,
         uint32_t noc_x_start,
@@ -139,10 +140,10 @@ public:
 #else
         const uintptr_t local_l1_addr = local_l1_addr_;
 #endif
-        if constexpr (mcast_mode == Noc::McastMode::INCLUDE_SRC) {
+        if constexpr (has_flag(opts, NocOptions::MCAST_INCL_SRC)) {
             noc_semaphore_set_multicast_loopback_src(
                 local_l1_addr, multicast_addr, num_dests, linked, noc.get_noc_id());
-        } else if constexpr (mcast_mode == Noc::McastMode::EXCLUDE_SRC) {
+        } else {
             noc_semaphore_set_multicast(local_l1_addr, multicast_addr, num_dests, linked, noc.get_noc_id());
         }
     }
