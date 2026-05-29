@@ -41,5 +41,5 @@ systems:
     num_devices: 2
   - sku: bh_quietbox_2
     name: "QuietBox 2 (2xP300)"
-    weights-cache-mode: local-disk
+    weights-cache-mode: yyz4-mnt-models
     num_devices: 4

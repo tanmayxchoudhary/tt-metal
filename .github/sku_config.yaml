@@ -207,8 +207,7 @@ skus:
   bh_quietbox_2:
     runs_on:
       - BH-QB-GE
-      - pipeline-perf
-      - in-service
+      - pipeline-perf-yyz4
 
   bh_spsg:
     runs_on:
