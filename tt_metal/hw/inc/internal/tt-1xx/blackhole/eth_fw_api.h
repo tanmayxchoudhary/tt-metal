@@ -327,7 +327,7 @@ FORCE_INLINE bool is_port_up() {
     return ((eth_status_t*)(MEM_SYSENG_ETH_STATUS))->port_status == port_status_e::PORT_UP;
 }
 
-static void service_eth_msg() __attribute__((unused)) {
+static __attribute__((unused)) void service_eth_msg() {
 #if defined(COMPILE_FOR_AERISC) && (PHYSICAL_AERISC_ID == 0)
     invalidate_l1_cache();
     reinterpret_cast<void (*)()>((uint32_t)(((eth_api_table_t*)(MEM_SYSENG_ETH_API_TABLE))->service_eth_msg_ptr))();
