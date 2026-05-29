@@ -64,7 +64,13 @@ def run_conv(
             torch_bias_tensor, weights_dtype if weights_dtype != ttnn.bfloat8_b else ttnn.float32
         )
 
-    tt_input_tensor = ttnn.from_torch(torch_input_tensor, ttnn.bfloat16)
+    input_layout = ttnn.TILE_LAYOUT if activations_dtype == ttnn.bfloat8_b else ttnn.ROW_MAJOR_LAYOUT
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor,
+        activations_dtype,
+        layout=input_layout,
+        device=device if activations_dtype == ttnn.bfloat8_b else None,
+    )
 
     if shard_layout is None:
         shard_layout = (
@@ -77,6 +83,7 @@ def run_conv(
         weights_dtype=weights_dtype,
         shard_layout=shard_layout,
         deallocate_activation=deallocate_activation,
+        output_layout=output_layout,
     )
     compute_config = ttnn.init_device_compute_kernel_config(
         device.arch(),
@@ -131,6 +138,41 @@ def run_conv(
 
     passing, pcc_msg = check_with_pcc_without_tensor_printout(torch_output_tensor, torch_out_golden_tensor, pcc=pcc)
     assert passing
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
+@pytest.mark.parametrize("dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
+@pytest.mark.parametrize(
+    ("input_channels", "kernel_size", "input_length"),
+    [
+        pytest.param(3, 7, 126, id="c3_kw7_l126"),
+        pytest.param(3, 7, 105, id="c3_kw7_l105"),
+        pytest.param(3, 7, 21, id="c3_kw7_l21"),
+        pytest.param(3, 7, 77, id="c3_kw7_l77"),
+        pytest.param(3, 7, 35, id="c3_kw7_l35"),
+        pytest.param(3, 3, 21, id="c3_kw3_l21"),
+        pytest.param(24, 3, 21, id="c24_kw3_l21"),
+    ],
+)
+def test_conv1d_depthwise_small_channels(device, input_channels, kernel_size, input_length, dtype):
+    run_conv(
+        device,
+        ttnn.MathFidelity.HiFi4,
+        dtype,  # activations_dtype
+        ttnn.bfloat16,  # weights_dtype
+        dtype,  # output_dtype
+        1,  # batch_size
+        input_channels,  # output_channels
+        input_channels,  # input_channels
+        input_length,
+        kernel_size,
+        1,  # stride
+        0,  # padding
+        True,  # use_1d_systolic_array
+        None,  # config_override
+        fp32_accum=True,
+        groups=input_channels,
+    )
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
