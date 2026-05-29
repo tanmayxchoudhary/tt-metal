@@ -365,13 +365,13 @@ bool run_sfpu_all_same_buffer(
     };
 
     experimental::metal2_host_api::WorkUnitSpec wu{
-        .unique_id = "main",
+        .name = "main",
         .kernels = {READER, WRITER, COMPUTE},
         .target_nodes = node,
     };
 
     experimental::metal2_host_api::ProgramSpec spec{
-        .program_id = "sfpu_compute",
+        .name = "sfpu_compute",
         .kernels = {reader_spec, writer_spec, compute_spec},
         .dataflow_buffers = {in_dfb_spec, out_dfb_spec},
         .work_units = {wu},
@@ -591,13 +591,13 @@ bool run_sfpu_binary_two_input_buffer(
     };
 
     experimental::metal2_host_api::WorkUnitSpec wu{
-        .unique_id = "main",
+        .name = "main",
         .kernels = {READER, WRITER, COMPUTE},
         .target_nodes = node,
     };
 
     experimental::metal2_host_api::ProgramSpec spec{
-        .program_id = "sfpu_binary_compute",
+        .name = "sfpu_binary_compute",
         .kernels = {reader_spec, writer_spec, compute_spec},
         .dataflow_buffers = {in0_dfb_spec, in1_dfb_spec, out_dfb_spec},
         .work_units = {wu},
