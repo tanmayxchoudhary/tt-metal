@@ -85,7 +85,6 @@ inline void llk_unpack_hw_configure(const std::uint32_t unpA_operand, const std:
     // In0 -> unpA
     // In1 -> unpB
     const uint32_t unpA_operand_id = get_operand_id(unpA_operand);
-    const uint32_t unpB_operand_id = get_operand_id(unpB_operand);
 
     // unpA -> srcA
     // unpB -> srcB
