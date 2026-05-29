@@ -11,7 +11,7 @@
 #include "ckernel_ops.h"
 // clang-format off: sfpi_inline must be defined before ckernel_sfpu_polyval.h
 #include "sfpi.h"
-#include "ckernel_sfpu_polyval.h"
+#include "sfpu/ckernel_sfpu_polyval.h"
 // clang-format on
 #include "ckernel_sfpu_recip.h"
 #include "lltt.h"
